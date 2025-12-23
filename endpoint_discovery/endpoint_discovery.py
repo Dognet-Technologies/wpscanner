@@ -73,6 +73,40 @@ class EndpointDiscovery:
             '/wordpress_backup.zip',
             '/.htaccess.bak',
             '/.htaccess~',
+            '/wp-config.php.backup',
+            '/wp-config.php.bkp',
+            '/wp-config.php.copy',
+            '/wp-config.php.disabled',
+            '/wp-config.php.tmp',
+            '/wp-config.php.txt',
+            '/wp-config.php.zip',
+            '/wp-config.php.tar.gz',
+            '/wp-config.bkp',
+            '/wp-config.old',
+            '/wp-config.php.bak.php',
+            '/db.sql',
+            '/database_backup.sql',
+            '/backup-db.sql',
+            '/wp.sql',
+            '/wordpress.sql',
+            '/wordpress.sql.gz',
+            '/database.sql.gz',
+            '/db_backup.sql.gz',
+            '/site.zip',
+            '/site.tar.gz',
+            '/website.zip',
+            '/website_backup.zip',
+            '/public_html.zip',
+            '/www.zip',
+            '/html.zip',
+            '/.htaccess.old',
+            '/.htaccess.save',
+            '/.htaccess.bkp',
+            '/.htaccess.disabled',
+            '/wp-content/backup-db',
+            '/wp-config.php#',
+            '/wp-config.php.swo',
+            '/wp-config.php.swn',
             '/.htaccess.orig'
         ]
 
@@ -80,18 +114,46 @@ class EndpointDiscovery:
         """Configuration and sensitive files"""
         return [
             '/wp-config.php',
+            '/wp-config-sample.php',
+            '/wp-config.php~',
+            '/wp-config.php.bak',
+            '/wp-config.php.old',
+            '/wp-config.php.save',
+            '/wp-config.php.orig',
             '/.env',
             '/.env.local',
             '/.env.production',
+            '/.env.dev',
+            '/.env.prod',
+            '/.env.stage',
+            '/.env.staging',
+            '/.env.test',
+            '/.env.backup',
+            '/.env.bak',
+            '/.env.old',
             '/config.php',
-            '/configuration.php',
+            '/config.inc.php',
+            '/local-config.php',
             '/settings.php',
+            '/settings.local.php',
+            '/configuration.php',
+            '/parameters.yml',
+            '/parameters.yaml',
+            '/services.yml',
+            '/services.yaml',
             '/config.json',
             '/app.json',
+            '/appsettings.json',
+            '/appsettings.Production.json',
             '/composer.json',
             '/package.json',
+            '/firebase.json',
+            '/credentials.json',
             '/.git/config',
             '/.git/HEAD',
+            '/.git/index',
+            '/.git/logs/HEAD',
+            '/.gitmodules',
             '/.gitignore',
             '/web.config',
             '/server.xml',
@@ -109,10 +171,18 @@ class EndpointDiscovery:
             '/wp-content/debug.log',
             '/wp-content/uploads/debug.log',
             '/wp-content/cache/debug.log',
+            '/wp-content/logs/debug.log',
+            '/wp-content/logs/error.log',
+            '/wp-content/logs/access.log',
+            '/logs/debug.log',
             '/logs/error.log',
             '/logs/access.log',
+            '/log/error.log',
+            '/log/access.log',
             '/var/log/apache2/error.log',
+            '/var/log/apache2/access.log',
             '/var/log/nginx/error.log',
+            '/var/log/nginx/access.log',
             '/error_log',
             '/access_log',
             '/wp-admin/error.log',
@@ -120,8 +190,12 @@ class EndpointDiscovery:
             '/application.log',
             '/system.log',
             '/php_errors.log',
-            '/mysql.log'
+            '/php_error.log',
+            '/php.log',
+            '/mysql.log',
+            '/mysqld.log'
         ]
+
 
     def get_directory_endpoints(self, base_url):
         """Directory listings that might be exposed"""
@@ -132,8 +206,14 @@ class EndpointDiscovery:
             '/wp-content/plugins/',
             '/wp-content/cache/',
             '/wp-content/backups/',
+            '/wp-content/backup/',
             '/wp-content/upgrade/',
             '/wp-content/temp/',
+            '/wp-content/tmp/',
+            '/wp-content/logs/',
+            '/wp-content/uploads/backups/',
+            '/wp-content/uploads/tmp/',
+            '/wp-content/uploads/logs/',
             '/wp-admin/',
             '/wp-includes/',
             '/uploads/',
@@ -148,8 +228,14 @@ class EndpointDiscovery:
             '/logs/',
             '/assets/',
             '/media/',
-            '/downloads/'
+            '/downloads/',
+            '/private/',
+            '/old/',
+            '/staging/',
+            '/test/',
+            '/dev/'
         ]
+
 
     def get_ajax_endpoints(self, base_url):
         """AJAX endpoints that might not be protected"""
@@ -159,6 +245,9 @@ class EndpointDiscovery:
             '/wp-admin/admin-ajax.php?action=wp_compression_test',
             '/wp-admin/admin-ajax.php?action=fetch-list',
             '/wp-admin/admin-ajax.php?action=ajax-tag-search',
+            '/wp-admin/admin-ajax.php?action=logged-in',
+            '/wp-admin/admin-ajax.php?action=check_ajax_referer',
+            '/wp-admin/admin-ajax.php?action=wp_ajax_nopriv',
             '/wp-json/',
             '/wp-json/wp/v2/',
             '/wp-json/wp/v2/users',
@@ -169,10 +258,18 @@ class EndpointDiscovery:
             '/wp-json/wp/v2/taxonomies',
             '/wp-json/wp/v2/statuses',
             '/wp-json/wp/v2/types',
+            '/wp-json/wp/v2/settings',
+            '/wp-json/wp/v2/themes',
+            '/wp-json/wp/v2/plugins',
+            '/wp-json/wp/v2/search',
             '/wp-json/oembed/1.0/embed',
+            '/wp-json/oembed/1.0/proxy',
             '/?rest_route=/',
-            '/?rest_route=/wp/v2/users'
+            '/?rest_route=/wp/v2/users',
+            '/?rest_route=/wp/v2/posts',
+            '/?rest_route=/wp/v2/media'
         ]
+
 
     def get_api_endpoints(self, base_url):
         """API endpoints that might expose data"""
@@ -180,23 +277,42 @@ class EndpointDiscovery:
             '/api/',
             '/api/v1/',
             '/api/v2/',
+            '/api/v3/',
+            '/api/public/',
+            '/api/private/',
             '/rest/',
+            '/rest/v1/',
+            '/rest/v2/',
             '/graphql',
+            '/graphql/',
+            '/wp-json/',
+            '/wp-json/wp/v2/',
             '/wp-json/wp/v2/users',
+            '/wp-json/wp/v2/posts',
+            '/wp-json/wp/v2/pages',
             '/feed/',
+            '/feed/rss/',
+            '/feed/atom/',
             '/rss/',
+            '/rss.xml',
             '/atom/',
+            '/atom.xml',
             '/sitemap.xml',
             '/sitemap_index.xml',
+            '/wp-sitemap.xml',
+            '/wp-sitemap-posts-post-1.xml',
             '/robots.txt',
             '/.well-known/',
             '/.well-known/security.txt',
+            '/.well-known/change-password',
             '/security.txt',
             '/humans.txt',
             '/ads.txt',
             '/favicon.ico',
-            '/crossdomain.xml'
+            '/crossdomain.xml',
+            '/clientaccesspolicy.xml'
         ]
+
 
     def get_cache_endpoints(self, base_url):
         """Cache files and directories"""
@@ -213,6 +329,16 @@ class EndpointDiscovery:
             '/wp-content/cache/background-css/',
             '/cache/',
             '/tmp/cache/',
+            '/wp-content/cache/litespeed/',
+            '/wp-content/cache/lscache/',
+            '/wp-content/cache/autoptimize/',
+            '/wp-content/cache/breeze/',
+            '/wp-content/cache/wpo/',
+            '/wp-content/cache/wp-fastest-cache/',
+            '/wp-content/cache/w3-total-cache/',
+            '/wp-content/cache/cloudflare/',
+            '/wp-content/plugins/wp-super-cache/',
+            '/wp-content/uploads/cache/',
             '/.cache/'
         ]
 
@@ -234,6 +360,19 @@ class EndpointDiscovery:
             '/wp-admin/maint/repair.php',
             '/wp-admin/setup-config.php',
             '/wp-admin/install.php',
+            '/wp-content/uploads/debug.log',
+            '/wp-content/uploads/error.log',
+            '/wp-content/uploads/php_errors.log',
+            '/wp-content/uploads/logs/',
+            '/wp-content/logs/',
+            '/wp-content/tmp/',
+            '/wp-content/test/',
+            '/wp-content/staging/',
+            '/php_error.log',
+            '/error_log',
+            '/xdebug.php',
+            '/trace.php',
+            '/dump.php',
             '/wp-admin/upgrade.php'
         ]
 
@@ -270,6 +409,13 @@ class EndpointDiscovery:
                 f'/wp-content/plugins/{plugin}/backup/',
                 f'/wp-content/plugins/{plugin}/logs/',
                 f'/wp-content/plugins/{plugin}/admin/config.php',
+                f'/wp-content/plugins/{plugin}/readme.md',
+                f'/wp-content/plugins/{plugin}/README.md',
+                f'/wp-content/plugins/{plugin}/readme.html',
+                f'/wp-content/plugins/{plugin}/uninstall.php',
+                f'/wp-content/plugins/{plugin}/vendor/',
+                f'/wp-content/plugins/{plugin}/vendor/autoload.php',
+                f'/wp-content/plugins/{plugin}/tests/',
                 f'/wp-content/plugins/{plugin}/includes/config.php'
             ])
         
@@ -339,17 +485,48 @@ class EndpointDiscovery:
         # 3. Dot, slash, semicolon variations
         variations = [
             endpoint + '/.',
+            endpoint + '/..',
+            endpoint + '/./',
+            endpoint + '/./.',
+            endpoint + '/;',
+
+            '//' + endpoint.lstrip('/'),
             '//' + endpoint.lstrip('/') + '//',
+            '///' + endpoint.lstrip('/'),
+
+            '/./' + endpoint.lstrip('/'),
+            '/./' + endpoint.lstrip('/') + '/.',
             '/./' + endpoint.lstrip('/') + '/..',
+
+            '/../' + endpoint.lstrip('/'),
+            '/..;/' + endpoint.lstrip('/'),
+            '/..;/' + endpoint.lstrip('/') + '/',
+
             '/;/' + endpoint.lstrip('/'),
+            '/;/' + endpoint.lstrip('/') + '/',
             '/.;/' + endpoint.lstrip('/'),
-            '//;//' + endpoint.lstrip('/')
+            '/.;/' + endpoint.lstrip('/') + '/',
+
+            '//;/' + endpoint.lstrip('/'),
+            '//.;/' + endpoint.lstrip('/'),
+            '//;//' + endpoint.lstrip('/'),
+
+            endpoint + ';',
+            endpoint + ';/',
+            endpoint + ';/.',
+            endpoint + ';/.;',
         ]
-        
+
         for variation in variations:
             try:
                 bypass_url = f"{base_url.rstrip('/')}{variation}"
-                response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
+                response = self.session.get(
+                    bypass_url,
+                    headers=self.headers,
+                    timeout=10,
+                    allow_redirects=False
+                )
+
                 if response.status_code == 200:
                     bypasses.append({
                         'method': f'Path Variation ({variation})',
@@ -357,17 +534,35 @@ class EndpointDiscovery:
                         'status': response.status_code,
                         'preview': response.text[:200]
                     })
+
             except Exception:
                 continue
 
-        # 4. ..;/ bypass
+
+        # 4. ..;/ directory traversal style bypass
         try:
-            if '/' in endpoint.strip('/'):
-                parts = endpoint.strip('/').split('/')
-                if len(parts) > 0:
-                    modified_endpoint = '/' + '/'.join(parts[:-1]) + '/' + parts[-1] + '..;/'
+            clean_endpoint = endpoint.strip('/')
+
+            if '/' in clean_endpoint:
+                parts = clean_endpoint.split('/')
+
+                if len(parts) >= 1:
+                    modified_endpoint = (
+                        '/' +
+                        '/'.join(parts[:-1]) +
+                        '/' +
+                        parts[-1] +
+                        '..;/'
+                    )
+
                     bypass_url = f"{base_url.rstrip('/')}{modified_endpoint}"
-                    response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
+                    response = self.session.get(
+                        bypass_url,
+                        headers=self.headers,
+                        timeout=10,
+                        allow_redirects=False
+                    )
+
                     if response.status_code == 200:
                         bypasses.append({
                             'method': '..;/ Directory Bypass',
@@ -375,85 +570,165 @@ class EndpointDiscovery:
                             'status': response.status_code,
                             'preview': response.text[:200]
                         })
+
         except Exception:
             pass
 
         # 5. Case variation bypass
         try:
-            # Create case variations
             case_variations = []
             original_path = endpoint.strip('/')
+
             if original_path:
-                # Random case mixing
-                varied_path = ''.join(c.upper() if random.choice([True, False]) else c.lower() for c in original_path)
-                case_variations.append('/' + varied_path)
-                
+                # All lowercase (baseline safety)
+                case_variations.append('/' + original_path.lower())
+
                 # All uppercase
                 case_variations.append('/' + original_path.upper())
-                
-                # Title case
+
+                # Title case (common on Windows/IIS or misconfigured FS)
                 case_variations.append('/' + original_path.title())
 
+                # Alternating case
+                alternating = ''.join(
+                    c.upper() if i % 2 == 0 else c.lower()
+                    for i, c in enumerate(original_path)
+                )
+                case_variations.append('/' + alternating)
+
+                # Uppercase first character only
+                case_variations.append('/' + original_path[0].upper() + original_path[1:])
+
             for variation in case_variations:
-                bypass_url = f"{base_url.rstrip('/')}{variation}"
-                response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
-                if response.status_code == 200:
-                    bypasses.append({
-                        'method': f'Case Variation ({variation})',
-                        'url': bypass_url,
-                        'status': response.status_code,
-                        'preview': response.text[:200]
-                    })
+                try:
+                    bypass_url = f"{base_url.rstrip('/')}{variation}"
+                    response = self.session.get(
+                        bypass_url,
+                        headers=self.headers,
+                        timeout=10,
+                        allow_redirects=False
+                    )
+
+                    if response.status_code == 200:
+                        bypasses.append({
+                            'method': f'Case Variation ({variation})',
+                            'url': bypass_url,
+                            'status': response.status_code,
+                            'preview': response.text[:200]
+                        })
+
+                except Exception:
+                    continue
+
         except Exception:
             pass
 
         # 6. Web Cache Poisoning with X-Original-URL (alternative headers)
-        cache_headers = ['X-Rewrite-URL', 'X-Forwarded-Path', 'X-Real-URL']
+        cache_headers = [
+            'X-Original-URL',
+            'X-Rewrite-URL',
+            'X-Forwarded-Path',
+            'X-Forwarded-Uri',
+            'X-Real-URL'
+        ]
+
+        fake_path = '/cache-test'
+
         for header_name in cache_headers:
             try:
                 headers = self.headers.copy()
                 headers[header_name] = endpoint
-                fake_url = f"{base_url.rstrip('/')}/cache-test"
-                response = self.session.get(fake_url, headers=headers, timeout=10, allow_redirects=False)
+
+                test_url = f"{base_url.rstrip('/')}{fake_path}"
+                response = self.session.get(
+                    test_url,
+                    headers=headers,
+                    timeout=10,
+                    allow_redirects=False
+                )
+
                 if response.status_code == 200:
                     bypasses.append({
                         'method': f'Cache Poisoning ({header_name})',
-                        'url': fake_url,
+                        'url': test_url,
                         'headers': f'{header_name}: {endpoint}',
                         'status': response.status_code,
                         'preview': response.text[:200]
                     })
+
             except Exception:
                 continue
 
-        return bypasses
-
     def verify_403_specific(self, base_url, endpoint):
-        """Verify if a specific 403 response is real by testing with random extension"""
+        """
+        Analyze whether a 403 response is endpoint-specific or generic.
+
+        IMPORTANT:
+        - This function MUST NOT invalidate a bypass.
+        - It only provides context and confidence level.
+        """
+
         import string
-        
-        # Generate random string
-        random_suffix = ''.join(random.choices(string.ascii_lowercase, k=8))
-        
-        # Create test endpoint with random suffix
+        import random
+
+        result = {
+            "endpoint_specific": None,
+            "confidence": "unknown",
+            "note": ""
+        }
+
+        random_suffix = ''.join(
+            random.choices(string.ascii_lowercase, k=8)
+        )
+
         if endpoint.endswith('/'):
             test_endpoint = endpoint + random_suffix
         else:
             test_endpoint = endpoint + '-' + random_suffix
-        
+
         try:
             test_url = f"{base_url.rstrip('/')}{test_endpoint}"
-            response = self.session.get(test_url, headers=self.headers, timeout=10, allow_redirects=False)
-            
+
+            response = self.session.get(
+                test_url,
+                headers=self.headers,
+                timeout=10,
+                allow_redirects=False
+            )
+
             if response.status_code == 403:
-                return False, f"False positive (test endpoint {test_endpoint} also returns 403)"
+                result["endpoint_specific"] = False
+                result["confidence"] = "medium"
+                result["note"] = (
+                    "403 appears to be generic "
+                    "(random non-existing endpoint also returns 403)"
+                )
+
             elif response.status_code == 404:
-                return True, f"Real 403 (test endpoint {test_endpoint} correctly returns 404)"
+                result["endpoint_specific"] = True
+                result["confidence"] = "high"
+                result["note"] = (
+                    "403 is endpoint-specific "
+                    "(random non-existing endpoint returns 404)"
+                )
+
             else:
-                return True, f"Likely real 403 (test endpoint returns {response.status_code})"
-                
+                result["endpoint_specific"] = True
+                result["confidence"] = "medium"
+                result["note"] = (
+                    f"Unexpected status code on test endpoint ({response.status_code})"
+                )
+
         except Exception as e:
-            return True, f"Cannot verify (test failed: {str(e)})"
+            result["endpoint_specific"] = None
+            result["confidence"] = "low"
+            result["note"] = f"Verification failed: {str(e)}"
+
+        return result
+
+
+
+        # 6. Web Cache Poisoning with alternative path headers
 
     def test_endpoint(self, base_url, endpoint):
         """Test a single endpoint with enhanced 403 handling"""
@@ -481,30 +756,43 @@ class EndpointDiscovery:
             
             # Determine if endpoint is interesting
             if response.status_code == 200:
-                content = response.text[:1000]  # First 1000 chars
+                content = response.text[:1000]
                 result['preview'] = content[:200]
-                
-                # Check for interesting content
-                interesting_patterns = [
-                    'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
-                    'define(', 'mysql:', 'postgres:', 
-                    'API_KEY', 'SECRET', 'TOKEN',
+
+                content_lower = content.lower()
+
+                strong_indicators = [
+                    'db_password', 'db_user', 'db_name', 'db_host',
+                    'api_key', 'secret', 'token',
+                    'aws_access_key', 'aws_secret',
+                    'mysql:', 'postgres:',
+                    'select ', 'insert ', 'update ', 'delete ',
+                    'wp_users', 'wp_options',
+                    'stack trace', 'exception', 'fatal error'
+                ]
+
+                weak_indicators = [
                     'password', 'username', 'admin',
-                    'error', 'warning', 'exception',
-                    'stack trace', 'debug',
-                    'Index of', 'Directory listing',
-                    '<?php', '<?xml', '{', '[',
-                    'SQL', 'SELECT', 'INSERT', 'UPDATE',
-                    'wp_', 'wordpress', 'admin',
+                    'error', 'warning', 'debug',
+                    'index of', 'directory listing',
+                    '<?php', '<?xml',
+                    'wordpress', 'wp_',
                     'version', 'changelog'
                 ]
-                
-                content_lower = content.lower()
-                for pattern in interesting_patterns:
-                    if pattern.lower() in content_lower:
+
+                for indicator in strong_indicators:
+                    if indicator in content_lower:
                         result['interesting'] = True
-                        result['reason'] = f"Contains: {pattern}"
+                        result['reason'] = f"Strong indicator detected: {indicator}"
                         break
+
+                if not result.get('interesting'):
+                    for indicator in weak_indicators:
+                        if indicator in content_lower:
+                            result['interesting'] = True
+                            result['reason'] = f"Weak indicator detected: {indicator}"
+                            break
+
                 
             elif response.status_code == 403:
                 # FIRST: Verify if the 403 is real using the random suffix method
@@ -723,7 +1011,27 @@ def main():
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("🔍 WORDPRESS ENDPOINT DISCOVERY")
-    print("📚 For Authorized Security Testing Only")
+    print("     :::       ::: :::::::::: ::::    ::: :::::::::  :::   ::: ")   
+    print("     :+:       :+: :+:        :+:+:   :+: :+:    :+: :+:   :+: ")
+    print("     +:+       +:+ +:+        :+:+:+  +:+ +:+    +:+  +:+ +:+ ")
+    print("     +#+  +:+  +#+ +#++:++#   +#+ +:+ +#+ +#+    +:+   +#++: ")  
+    print("     +#+ +#+#+ +#+ +#+        +#+  +#+#+# +#+    +#+    +#+ ")   
+    print("     #+#+# #+#+#  #+#        #+#   #+#+# #+#    #+#    #+# ")   
+    print("     ###   ###   ########## ###    #### #########     ### ")
+    print("")
+    print("                 Wordpress ENDpoint DiscoverY             ")
+    print("=" * 80)
+    print("")
+    print("Prima versione rilasciata da Dognet Technologies SRL ")
+    print("Author: @DognetTech")
+    print("Version: 0.1.0 ")
+    print("Release Date: 23/12/2025")
+    print("License: MIT License")
+    print("")
+    print("This tool is designed for authorized penetration testing purposes.")
+    print("Unauthorized use is illegal and unethical.")
+    print("Please ensure you have proper authorization before using this tool.")
+    print("")
+    print("For more information about our services, visit: https://dognet.tech")
     print("=" * 80)
     main()

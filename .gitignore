@@ -1,1 +1,7 @@
 *.sublime-*
+endpoint_discovery/
+*.json
+*.md
+*.tzt
+*.png
+__pycache__/

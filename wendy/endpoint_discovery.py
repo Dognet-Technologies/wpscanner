@@ -540,7 +540,7 @@ class EndpointDiscovery:
         matches = sum(1 for ind in indicators if ind in content_lower)
         return matches >= 2  # At least 2 indicators
 
-    def is_bypass_false_positive(self, base_url, endpoint, bypass_content, bypass_url):
+    def is_bypass_false_positive(self, base_url, endpoint, bypass_content, bypass_url, content_length=None):
         """
         Verify if a bypass result is a false positive.
         Returns (is_false_positive: bool, reason: str, confidence: str)
@@ -552,15 +552,19 @@ class EndpointDiscovery:
         endpoint_parts = [p for p in endpoint.strip('/').split('/') if p]
         is_directory = endpoint.endswith('/')
 
+        # Use actual content length if provided, otherwise use sample length
+        actual_length = content_length if content_length else len(bypass_content)
+
         # Check 1: Is it a real directory listing?
         if is_directory and self.is_directory_listing(bypass_content):
-            # Verify the listing mentions files/dirs we'd expect
-            return False, "Valid directory listing detected", "high"
+            # Additional validation: directory listing should be relatively short
+            if actual_length < 50000:  # Real listings are usually small
+                return False, "Valid directory listing detected", "high"
 
         # Check 2: Compare with homepage
         homepage_sig = self.get_homepage_signature(base_url)
         if homepage_sig:
-            # Check if content is very similar to homepage
+            # Check if content is very similar to homepage using hash
             bypass_hash = hash(bypass_content[:1000])
             if bypass_hash == homepage_sig['content_hash']:
                 return True, "Content identical to homepage", "high"
@@ -569,49 +573,80 @@ class EndpointDiscovery:
             bypass_title = self._extract_title(bypass_content)
             if bypass_title and homepage_sig['title']:
                 if bypass_title == homepage_sig['title']:
-                    # Same title as homepage - likely false positive
-                    # Unless endpoint name is in content
-                    if endpoint_parts and not any(part.lower() in content_lower for part in endpoint_parts):
-                        return True, f"Same title as homepage: '{bypass_title}'", "medium"
+                    # Same title as homepage - likely false positive for directories
+                    if is_directory:
+                        # For directories, same title as homepage is almost always FP
+                        if 'index of' not in content_lower:
+                            return True, f"Same title as homepage: '{bypass_title}'", "high"
+                    else:
+                        # For files, check if endpoint name appears
+                        if endpoint_parts and not any(part.lower() in content_lower for part in endpoint_parts):
+                            return True, f"Same title as homepage: '{bypass_title}'", "medium"
 
-            # Check content length similarity (within 5%)
-            length_diff = abs(len(bypass_content) - homepage_sig['length']) / max(homepage_sig['length'], 1)
-            if length_diff < 0.05 and len(bypass_content) > 1000:
-                return True, "Content length matches homepage", "medium"
+            # Check content length similarity using actual length
+            if homepage_sig['length'] > 0:
+                length_diff = abs(actual_length - homepage_sig['length']) / homepage_sig['length']
+                if length_diff < 0.05:  # Within 5%
+                    # Very similar length to homepage
+                    if is_directory and 'index of' not in content_lower:
+                        return True, f"Content length matches homepage ({actual_length} vs {homepage_sig['length']})", "high"
+                    elif actual_length > 5000:  # Large content, likely homepage
+                        return True, f"Content length matches homepage ({actual_length} vs {homepage_sig['length']})", "medium"
 
-        # Check 3: For directories, verify endpoint reference in content
-        if is_directory and endpoint_parts:
-            last_dir = endpoint_parts[-1].lower()
-            # A real directory listing should mention the directory name or its contents
-            if last_dir not in content_lower and 'index of' not in content_lower:
-                # Check if it's a complex HTML page (not a listing)
-                if content_lower.count('<div') > 10 or content_lower.count('<script') > 3:
-                    return True, "Complex HTML page, not a directory listing", "medium"
+        # Check 3: For directories, verify it's not a complex webpage
+        if is_directory:
+            # Count HTML complexity indicators
+            div_count = content_lower.count('<div')
+            script_count = content_lower.count('<script')
+            nav_count = content_lower.count('<nav')
+            header_count = content_lower.count('<header')
+            footer_count = content_lower.count('<footer')
 
-        # Check 4: Common error page patterns that return 200
+            complexity_score = div_count + (script_count * 2) + nav_count + header_count + footer_count
+
+            # Real directory listings have minimal HTML structure
+            if complexity_score > 15:
+                if 'index of' not in content_lower and 'directory' not in content_lower:
+                    return True, f"Complex HTML page (complexity: {complexity_score}), not a directory listing", "high"
+
+            # Check for common CMS/theme indicators (definitely not a directory listing)
+            cms_indicators = ['wordpress', 'wp-content', 'jquery', 'bootstrap', 'react', 'angular', 'vue']
+            if any(ind in content_lower for ind in cms_indicators):
+                if 'index of' not in content_lower:
+                    return True, "CMS/Framework content detected, not a directory listing", "high"
+
+        # Check 4: Common error page patterns that return 200 (soft 404)
         error_patterns = [
-            'page not found',
-            'not found',
-            '404',
-            'does not exist',
-            'error 404',
-            'file not found',
-            'nothing found',
-            'pagina non trovata',
-            'non trovato'
+            ('page not found', 'high'),
+            ('error 404', 'high'),
+            ('file not found', 'high'),
+            ('pagina non trovata', 'high'),
+            ('not found', 'medium'),
+            ('does not exist', 'medium'),
+            ('nothing found', 'medium'),
+            ('non trovato', 'medium'),
+            ('non esiste', 'medium'),
+            ('risorsa non disponibile', 'high'),
         ]
-        if any(pattern in content_lower for pattern in error_patterns):
-            # But make sure it's not just mentioning 404 in another context
-            if 'page not found' in content_lower or 'error 404' in content_lower:
-                return True, "Soft 404 error page", "high"
+        for pattern, confidence in error_patterns:
+            if pattern in content_lower:
+                # Verify it's in a context suggesting an error
+                if confidence == 'high':
+                    return True, f"Soft 404 error page ('{pattern}')", "high"
+                # For medium confidence, check surrounding context
+                elif '<title' in content_lower or '<h1' in content_lower:
+                    return True, f"Likely soft 404 error page ('{pattern}')", "medium"
 
-        # Check 5: For header bypasses (X-Original-URL etc), verify we're not just getting homepage
-        if '/' in bypass_url and bypass_url.rstrip('/').endswith(base_url.rstrip('/')):
-            # We requested the base URL with bypass header - verify content changed
-            if homepage_sig and len(bypass_content) > 500:
-                # If content is similar length and same title, it's the homepage
-                if abs(len(bypass_content) - homepage_sig['length']) < 100:
-                    return True, "Response is the homepage (bypass header ignored)", "high"
+        # Check 5: For header bypasses, verify the bypass actually worked
+        parsed_base = base_url.rstrip('/')
+        if bypass_url.rstrip('/') == parsed_base or bypass_url.rstrip('/') == parsed_base + '/':
+            # We requested the base URL with a bypass header
+            if homepage_sig:
+                # If content length is very close to homepage, bypass was ignored
+                if homepage_sig['length'] > 0:
+                    length_diff = abs(actual_length - homepage_sig['length']) / homepage_sig['length']
+                    if length_diff < 0.1:  # Within 10%
+                        return True, "Bypass header was ignored (response matches homepage)", "high"
 
         return False, "Appears valid", "low"
 
@@ -651,12 +686,15 @@ class EndpointDiscovery:
                 bypass_url = f"{base_url.rstrip('/')}{endpoint}"
                 response = self.session.request(method, bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
                         'method': f'HTTP Method ({method})',
                         'http_method': method,
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
                         'curl_command': self.generate_curl_command(bypass_url, method=method)
                     })
             except Exception:
@@ -688,12 +726,15 @@ class EndpointDiscovery:
                 response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     header_name = list(payload.keys())[0]
+                    content = response.text
                     bypasses.append({
                         'method': f'Header ({header_name})',
                         'url': url,
                         'bypass_headers': payload,
                         'status': response.status_code,
-                        'preview': response.text[:200],
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
                         'curl_command': self.generate_curl_command(url, method='GET', bypass_headers=payload)
                     })
             except Exception:
@@ -727,11 +768,14 @@ class EndpointDiscovery:
                 headers = self.get_random_headers()
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
                         'method': f'Path ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
                         'curl_command': self.generate_curl_command(bypass_url)
                     })
             except Exception:
@@ -751,11 +795,14 @@ class EndpointDiscovery:
                 headers = self.get_random_headers()
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
                         'method': f'Case ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
                         'curl_command': self.generate_curl_command(bypass_url)
                     })
         except Exception:
@@ -764,10 +811,12 @@ class EndpointDiscovery:
         # Verify each bypass for false positives
         verified_bypasses = []
         for bypass in bypasses:
-            content = bypass.get('preview', '')
-            # Get more content for verification if available
+            # Use full_content for better FP detection, fallback to preview
+            content = bypass.get('full_content', bypass.get('preview', ''))
+            content_length = bypass.get('content_length')
+
             is_fp, fp_reason, fp_confidence = self.is_bypass_false_positive(
-                base_url, endpoint, content, bypass['url']
+                base_url, endpoint, content, bypass['url'], content_length
             )
 
             bypass['is_false_positive'] = is_fp

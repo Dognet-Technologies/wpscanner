@@ -416,14 +416,239 @@ class EndpointDiscovery:
             '/.shadow'
         ]
 
-    def generate_curl_command(self, url, method='GET', headers=None):
-        """Generate a curl command for manual testing"""
+    def generate_curl_command(self, url, method='GET', headers=None, bypass_headers=None):
+        """Generate a simplified curl command for manual testing"""
         cmd = f"curl -i -X {method} '{url}'"
-        if headers:
-            for k, v in headers.items():
+
+        # Only include essential headers for bypass, not all browser headers
+        if bypass_headers:
+            for k, v in bypass_headers.items():
                 v_escaped = str(v).replace("'", "'\\''")
                 cmd += f" -H '{k}: {v_escaped}'"
+
         return cmd
+
+    def generate_browser_command(self, url):
+        """Generate command to open URL in browser"""
+        # xdg-open works on Linux, open works on macOS
+        return f"xdg-open '{url}' 2>/dev/null || open '{url}'"
+
+    def _print_bypass_details(self, bypass, show_warning=False):
+        """Print formatted bypass details"""
+        method = bypass['method']
+        url = bypass['url']
+        has_custom_headers = bypass.get('bypass_headers')
+        http_method = bypass.get('http_method', 'GET')
+
+        # Show warning indicator if needed
+        warning = " ⚠️" if show_warning else ""
+        print(f"      ├─ {method}{warning}")
+
+        if show_warning and bypass.get('fp_reason'):
+            print(f"      │  ⚠️  Warning: {bypass['fp_reason']}")
+
+        if has_custom_headers:
+            for k, v in has_custom_headers.items():
+                print(f"      │  Header: {k}: {v}")
+
+        print(f"      │  Curl: {bypass['curl_command']}")
+
+        # Browser can only open GET requests without custom headers
+        if not has_custom_headers and http_method == 'GET':
+            print(f"      │  Browser: {self.generate_browser_command(url)}")
+
+        if bypass.get('preview'):
+            bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
+            print(f"      │  Preview: {bp_preview}...")
+
+        print(f"      │")
+
+    def generate_download_command(self, url):
+        """Generate command to download a file"""
+        return f"curl -O '{url}'"
+
+    def is_likely_false_positive(self, endpoint, content_type, content):
+        """Check if a 200 response is likely a false positive (HTML returned for non-HTML file)"""
+        # List of extensions that should NOT return HTML
+        non_html_extensions = [
+            '.log', '.txt', '.sql', '.zip', '.tar', '.gz', '.bak', '.old',
+            '.conf', '.cfg', '.ini', '.env', '.json', '.xml', '.yml', '.yaml',
+            '.php', '.py', '.rb', '.pl', '.sh', '.bash', '.zsh',
+            '.key', '.pem', '.crt', '.cer', '.pub', '.ppk',
+            '.db', '.sqlite', '.sqlite3', '.mdb',
+            '.csv', '.tsv', '.xls', '.xlsx'
+        ]
+
+        # Check if endpoint has a non-HTML extension
+        endpoint_lower = endpoint.lower()
+        has_non_html_ext = any(endpoint_lower.endswith(ext) for ext in non_html_extensions)
+
+        # Check if response is HTML
+        is_html = False
+        if content_type:
+            is_html = 'text/html' in content_type.lower()
+        if not is_html and content:
+            # Check content for HTML markers
+            content_lower = content[:500].lower()
+            is_html = any(marker in content_lower for marker in ['<!doctype html', '<html', '<head', '<body'])
+
+        return has_non_html_ext and is_html
+
+    def get_homepage_signature(self, base_url):
+        """Fetch homepage content to use as reference for false positive detection"""
+        if hasattr(self, '_homepage_signature'):
+            return self._homepage_signature
+
+        try:
+            response = self.session.get(base_url, headers=self.get_random_headers(), timeout=10, allow_redirects=True)
+            content = response.text[:2000]
+            # Create a signature: length + hash of key elements
+            self._homepage_signature = {
+                'length': len(response.text),
+                'title': self._extract_title(content),
+                'content_sample': content[:500],
+                'content_hash': hash(content[:1000])
+            }
+        except Exception:
+            self._homepage_signature = None
+
+        return self._homepage_signature
+
+    def _extract_title(self, html_content):
+        """Extract title from HTML content"""
+        import re
+        match = re.search(r'<title[^>]*>([^<]+)</title>', html_content, re.IGNORECASE)
+        return match.group(1).strip() if match else ''
+
+    def is_directory_listing(self, content):
+        """Check if content looks like a directory listing"""
+        content_lower = content.lower()
+        # Common directory listing indicators
+        indicators = [
+            'index of',
+            'directory listing',
+            'parent directory',
+            '[dir]',
+            '[to parent directory]',
+            '<pre>',  # Apache default listing uses <pre>
+            'last modified',
+            'size  description',
+            'name</a>',
+            'href=".."',
+            'href="../"'
+        ]
+        matches = sum(1 for ind in indicators if ind in content_lower)
+        return matches >= 2  # At least 2 indicators
+
+    def is_bypass_false_positive(self, base_url, endpoint, bypass_content, bypass_url, content_length=None):
+        """
+        Verify if a bypass result is a false positive.
+        Returns (is_false_positive: bool, reason: str, confidence: str)
+        """
+        if not bypass_content:
+            return True, "Empty response", "high"
+
+        content_lower = bypass_content.lower()
+        endpoint_parts = [p for p in endpoint.strip('/').split('/') if p]
+        is_directory = endpoint.endswith('/')
+
+        # Use actual content length if provided, otherwise use sample length
+        actual_length = content_length if content_length else len(bypass_content)
+
+        # Check 1: Is it a real directory listing?
+        if is_directory and self.is_directory_listing(bypass_content):
+            # Additional validation: directory listing should be relatively short
+            if actual_length < 50000:  # Real listings are usually small
+                return False, "Valid directory listing detected", "high"
+
+        # Check 2: Compare with homepage
+        homepage_sig = self.get_homepage_signature(base_url)
+        if homepage_sig:
+            # Check if content is very similar to homepage using hash
+            bypass_hash = hash(bypass_content[:1000])
+            if bypass_hash == homepage_sig['content_hash']:
+                return True, "Content identical to homepage", "high"
+
+            # Check if title matches homepage (common false positive)
+            bypass_title = self._extract_title(bypass_content)
+            if bypass_title and homepage_sig['title']:
+                if bypass_title == homepage_sig['title']:
+                    # Same title as homepage - likely false positive for directories
+                    if is_directory:
+                        # For directories, same title as homepage is almost always FP
+                        if 'index of' not in content_lower:
+                            return True, f"Same title as homepage: '{bypass_title}'", "high"
+                    else:
+                        # For files, check if endpoint name appears
+                        if endpoint_parts and not any(part.lower() in content_lower for part in endpoint_parts):
+                            return True, f"Same title as homepage: '{bypass_title}'", "medium"
+
+            # Check content length similarity using actual length
+            if homepage_sig['length'] > 0:
+                length_diff = abs(actual_length - homepage_sig['length']) / homepage_sig['length']
+                if length_diff < 0.05:  # Within 5%
+                    # Very similar length to homepage
+                    if is_directory and 'index of' not in content_lower:
+                        return True, f"Content length matches homepage ({actual_length} vs {homepage_sig['length']})", "high"
+                    elif actual_length > 5000:  # Large content, likely homepage
+                        return True, f"Content length matches homepage ({actual_length} vs {homepage_sig['length']})", "medium"
+
+        # Check 3: For directories, verify it's not a complex webpage
+        if is_directory:
+            # Count HTML complexity indicators
+            div_count = content_lower.count('<div')
+            script_count = content_lower.count('<script')
+            nav_count = content_lower.count('<nav')
+            header_count = content_lower.count('<header')
+            footer_count = content_lower.count('<footer')
+
+            complexity_score = div_count + (script_count * 2) + nav_count + header_count + footer_count
+
+            # Real directory listings have minimal HTML structure
+            if complexity_score > 15:
+                if 'index of' not in content_lower and 'directory' not in content_lower:
+                    return True, f"Complex HTML page (complexity: {complexity_score}), not a directory listing", "high"
+
+            # Check for common CMS/theme indicators (definitely not a directory listing)
+            cms_indicators = ['wordpress', 'wp-content', 'jquery', 'bootstrap', 'react', 'angular', 'vue']
+            if any(ind in content_lower for ind in cms_indicators):
+                if 'index of' not in content_lower:
+                    return True, "CMS/Framework content detected, not a directory listing", "high"
+
+        # Check 4: Common error page patterns that return 200 (soft 404)
+        error_patterns = [
+            ('page not found', 'high'),
+            ('error 404', 'high'),
+            ('file not found', 'high'),
+            ('pagina non trovata', 'high'),
+            ('not found', 'medium'),
+            ('does not exist', 'medium'),
+            ('nothing found', 'medium'),
+            ('non trovato', 'medium'),
+            ('non esiste', 'medium'),
+            ('risorsa non disponibile', 'high'),
+        ]
+        for pattern, confidence in error_patterns:
+            if pattern in content_lower:
+                # Verify it's in a context suggesting an error
+                if confidence == 'high':
+                    return True, f"Soft 404 error page ('{pattern}')", "high"
+                # For medium confidence, check surrounding context
+                elif '<title' in content_lower or '<h1' in content_lower:
+                    return True, f"Likely soft 404 error page ('{pattern}')", "medium"
+
+        # Check 5: For header bypasses, verify the bypass actually worked
+        parsed_base = base_url.rstrip('/')
+        if bypass_url.rstrip('/') == parsed_base or bypass_url.rstrip('/') == parsed_base + '/':
+            # We requested the base URL with a bypass header
+            if homepage_sig:
+                # If content length is very close to homepage, bypass was ignored
+                if homepage_sig['length'] > 0:
+                    length_diff = abs(actual_length - homepage_sig['length']) / homepage_sig['length']
+                    if length_diff < 0.1:  # Within 10%
+                        return True, "Bypass header was ignored (response matches homepage)", "high"
+
+        return False, "Appears valid", "low"
 
     def verify_403_validity(self, base_url):
         """Verify if 403 responses are real or false positives"""
@@ -461,12 +686,16 @@ class EndpointDiscovery:
                 bypass_url = f"{base_url.rstrip('/')}{endpoint}"
                 response = self.session.request(method, bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
-                        'method': f'HTTP Method Bypass ({method})',
+                        'method': f'HTTP Method ({method})',
+                        'http_method': method,
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method=method, headers=headers)
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
+                        'curl_command': self.generate_curl_command(bypass_url, method=method)
                     })
             except Exception:
                 pass
@@ -496,13 +725,17 @@ class EndpointDiscovery:
                 url = f"{base_url.rstrip('/')}/" if any(k in payload for k in ['X-Original-URL', 'X-Rewrite-URL', 'X-Forwarded-Path']) else f"{base_url.rstrip('/')}{endpoint}"
                 response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    header_name = list(payload.keys())[0]
+                    content = response.text
                     bypasses.append({
-                        'method': f'Header Bypass ({list(payload.keys())[0]})',
+                        'method': f'Header ({header_name})',
                         'url': url,
-                        'headers': str(payload),
+                        'bypass_headers': payload,
                         'status': response.status_code,
-                        'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(url, method='GET', headers=headers)
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
+                        'curl_command': self.generate_curl_command(url, method='GET', bypass_headers=payload)
                     })
             except Exception:
                 pass
@@ -535,12 +768,15 @@ class EndpointDiscovery:
                 headers = self.get_random_headers()
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
-                        'method': f'Path Variation ({variation})',
+                        'method': f'Path ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
+                        'curl_command': self.generate_curl_command(bypass_url)
                     })
             except Exception:
                 continue
@@ -559,17 +795,43 @@ class EndpointDiscovery:
                 headers = self.get_random_headers()
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    content = response.text
                     bypasses.append({
-                        'method': f'Case Variation ({variation})',
+                        'method': f'Case ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
-                        'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
+                        'preview': content[:200],
+                        'full_content': content[:2000],  # More content for FP detection
+                        'content_length': len(content),
+                        'curl_command': self.generate_curl_command(bypass_url)
                     })
         except Exception:
             pass
 
-        return bypasses
+        # Verify each bypass for false positives
+        verified_bypasses = []
+        for bypass in bypasses:
+            # Use full_content for better FP detection, fallback to preview
+            content = bypass.get('full_content', bypass.get('preview', ''))
+            content_length = bypass.get('content_length')
+
+            is_fp, fp_reason, fp_confidence = self.is_bypass_false_positive(
+                base_url, endpoint, content, bypass['url'], content_length
+            )
+
+            bypass['is_false_positive'] = is_fp
+            bypass['fp_reason'] = fp_reason
+            bypass['fp_confidence'] = fp_confidence
+
+            if not is_fp:
+                verified_bypasses.append(bypass)
+            elif fp_confidence == 'medium':
+                # Include medium confidence false positives but mark them
+                bypass['needs_verification'] = True
+                verified_bypasses.append(bypass)
+            # High confidence false positives are excluded
+
+        return verified_bypasses
 
     def verify_403_specific(self, base_url, endpoint):
         """Verify if a specific 403 response is real by testing with random extension"""
@@ -606,47 +868,61 @@ class EndpointDiscovery:
             headers = self.get_random_headers()
             response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
             
+            # Determine if this is a directory or file
+            is_directory = endpoint.endswith('/')
+            content_type = response.headers.get('Content-Type', '')
+
             result = {
                 'url': url,
                 'endpoint': endpoint,
                 'status_code': response.status_code,
                 'content_length': len(response.content),
-                'content_type': response.headers.get('Content-Type', ''),
+                'content_type': content_type,
                 'server': response.headers.get('Server', ''),
                 'interesting': False,
                 'reason': '',
                 'preview': '',
                 'bypasses': [],
                 'verification': '',
-                'curl_command': self.generate_curl_command(url, headers=headers)
+                'is_directory': is_directory,
+                'is_false_positive': False,
+                'curl_command': self.generate_curl_command(url),
+                'browser_command': self.generate_browser_command(url),
+                'download_command': None if is_directory else self.generate_download_command(url)
             }
-            
+
             # Determine if endpoint is interesting
             if response.status_code == 200:
                 content = response.text[:1000]  # First 1000 chars
                 result['preview'] = content[:200]
-                
-                # Check for interesting content
-                interesting_patterns = [
-                    'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
-                    'define(', 'mysql:', 'postgres:', 
-                    'API_KEY', 'SECRET', 'TOKEN',
-                    'password', 'username', 'admin',
-                    'error', 'warning', 'exception',
-                    'stack trace', 'debug',
-                    'Index of', 'Directory listing',
-                    '<?php', '<?xml', '{', '[',
-                    'SQL', 'SELECT', 'INSERT', 'UPDATE',
-                    'wp_', 'wordpress', 'admin',
-                    'version', 'changelog'
-                ]
-                
-                content_lower = content.lower()
-                for pattern in interesting_patterns:
-                    if pattern.lower() in content_lower:
-                        result['interesting'] = True
-                        result['reason'] = f"Contains: {pattern}"
-                        break
+
+                # Check for false positive (HTML response for non-HTML file)
+                if self.is_likely_false_positive(endpoint, content_type, content):
+                    result['is_false_positive'] = True
+                    result['interesting'] = False
+                    result['reason'] = "Likely false positive (HTML returned for non-HTML file)"
+                else:
+                    # Check for interesting content
+                    interesting_patterns = [
+                        'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
+                        'define(', 'mysql:', 'postgres:',
+                        'API_KEY', 'SECRET', 'TOKEN',
+                        'password', 'username', 'admin',
+                        'error', 'warning', 'exception',
+                        'stack trace', 'debug',
+                        'Index of', 'Directory listing',
+                        '<?php', '<?xml', '{', '[',
+                        'SQL', 'SELECT', 'INSERT', 'UPDATE',
+                        'wp_', 'wordpress', 'admin',
+                        'version', 'changelog'
+                    ]
+
+                    content_lower = content.lower()
+                    for pattern in interesting_patterns:
+                        if pattern.lower() in content_lower:
+                            result['interesting'] = True
+                            result['reason'] = f"Contains: {pattern}"
+                            break
                 
             elif response.status_code == 403:
                 # FIRST: Verify if the 403 is real using the random suffix method
@@ -784,58 +1060,76 @@ class EndpointDiscovery:
                     bypass_results.extend(result['bypasses'])
             
             for status, results in by_status.items():
-                print(f"\n📋 Status {status} ({len(results)} endpoints):")
+                print(f"\n{'─' * 60}")
+                print(f"  STATUS {status} ({len(results)} endpoints)")
+                print(f"{'─' * 60}")
+
                 for result in results:
-                    print(f"   • {result['endpoint']}")
-                    print(f"     Reason: {result.get('reason', 'N/A')}")
-                    
-                    if result.get('curl_command'):
-                        print(f"     Manual Test: {result['curl_command']}")
-                    
-                    # Show verification info for 403s
+                    endpoint = result['endpoint']
+                    reason = result.get('reason', 'N/A')
+                    is_dir = result.get('is_directory', endpoint.endswith('/'))
+
+                    # Print endpoint header
+                    icon = "📁" if is_dir else "📄"
+                    print(f"\n{icon} {endpoint}")
+                    print(f"   └─ {reason}")
+
+                    # Skip manual test commands for redirects
+                    if result['status_code'] in (301, 302):
+                        continue
+
+                    # Show verification for 403s
                     if result.get('verification'):
-                        print(f"     Verification: {result['verification']}")
-                    
-                    if result.get('preview'):
-                        preview = result['preview'][:100].replace('\n', ' ')
-                        print(f"     Preview: {preview}...")
-                    
-                    # Show bypasses if found
+                        print(f"   └─ Verification: {result['verification']}")
+
+                    # Show preview if available (and not a false positive warning)
+                    if result.get('preview') and not result.get('is_false_positive'):
+                        preview = result['preview'][:80].replace('\n', ' ').strip()
+                        print(f"   └─ Preview: {preview}...")
+
+                    # Show quick actions
+                    print(f"   └─ Actions:")
+                    if result.get('browser_command'):
+                        print(f"      • Open in browser: {result['browser_command']}")
+                    if result.get('download_command') and not is_dir:
+                        print(f"      • Download: {result['download_command']}")
+                    if result.get('curl_command'):
+                        print(f"      • Curl: {result['curl_command']}")
+
+                    # Show bypasses if found (for 403s)
                     if result.get('bypasses'):
-                        print(f"     🚨 BYPASSES FOUND ({len(result['bypasses'])}):")
-                        for bypass in result['bypasses']:
-                            print(f"       - {bypass['method']}: {bypass['status']}")
-                            if bypass.get('curl_command'):
-                                print(f"         Manual Test: {bypass['curl_command']}")
-                            if 'headers' in bypass:
-                                print(f"         Headers: {bypass['headers']}")
-                            if bypass.get('preview'):
-                                bp_preview = bypass['preview'][:80].replace('\n', ' ')
-                                print(f"         Preview: {bp_preview}...")
-                    print()
-            
+                        # Count verified vs needs-verification bypasses
+                        verified = [b for b in result['bypasses'] if not b.get('needs_verification')]
+                        needs_check = [b for b in result['bypasses'] if b.get('needs_verification')]
+
+                        if verified:
+                            print(f"\n   ✅ VERIFIED BYPASSES ({len(verified)}):")
+                            for bypass in verified:
+                                self._print_bypass_details(bypass)
+
+                        if needs_check:
+                            print(f"\n   ⚠️  BYPASSES NEEDING VERIFICATION ({len(needs_check)}):")
+                            for bypass in needs_check:
+                                self._print_bypass_details(bypass, show_warning=True)
+
             # Summary of bypasses
             if bypass_results:
-                print("\n🚨 403 BYPASS SUMMARY")
-                print("=" * 50)
-                print(f"✅ Found {len(bypass_results)} successful bypasses!")
-                
-                # Group bypasses by method
+                print(f"\n{'=' * 60}")
+                print("  403 BYPASS SUMMARY")
+                print(f"{'=' * 60}")
+                print(f"  Found {len(bypass_results)} successful bypass techniques\n")
+
+                # Group bypasses by method type
                 bypass_methods = {}
                 for bypass in bypass_results:
                     method = bypass['method']
                     if method not in bypass_methods:
                         bypass_methods[method] = 0
                     bypass_methods[method] += 1
-                
-                print("📊 Bypass techniques that worked:")
-                for method, count in bypass_methods.items():
-                    print(f"   - {method}: {count} endpoint(s)")
-                
-                print("\n🔧 Recommended actions:")
-                print("   1. Test bypassed endpoints manually for sensitive data")
-                print("   2. Use successful bypass techniques on other targets")
-                print("   3. Document bypass methods for reporting")
+
+                print("  Techniques that worked:")
+                for method, count in sorted(bypass_methods.items(), key=lambda x: -x[1]):
+                    print(f"    • {method}: {count} endpoint(s)")
         
         else:
             print("❌ No interesting endpoints found")
@@ -880,7 +1174,7 @@ if __name__ == "__main__":
     print("###   ###   ########## ###    #### #########     ###")          
     print("=" * 80)
     print()
-    print("🔍 WENDY - Wordpress ENDpoint discoverY")
+    print("🔍 WENDY - Wordpress ENDpoint discoverY v0.1.5")
     print("📚 For Authorized Security Testing Only")
     print("Dognet Technologies srl | info@dognet.tech")
     print()

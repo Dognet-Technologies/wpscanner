@@ -69,9 +69,9 @@ class EndpointDiscovery:
             'sensitive_files': self.get_sensitive_files_endpoints
         }
 
-    def get_random_headers(self):
-        """Generate a randomized header set for each request"""
-        headers = {
+    def get_clean_headers(self):
+        """Generate clean headers without bypass headers (for initial endpoint testing)"""
+        return {
             'User-Agent': random.choice(self.user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -84,12 +84,16 @@ class EndpointDiscovery:
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0'
         }
-        
+
+    def get_random_headers(self):
+        """Generate headers with a random bypass header (for bypass testing only)"""
+        headers = self.get_clean_headers()
+
         # Add a random bypass header with a random IP
         bypass_header = random.choice(self.bypass_headers_list)
         random_ip = f"{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
         headers[bypass_header] = random_ip
-        
+
         return headers
 
     def get_backup_endpoints(self, base_url):
@@ -500,7 +504,7 @@ class EndpointDiscovery:
             return self._homepage_signature
 
         try:
-            response = self.session.get(base_url, headers=self.get_random_headers(), timeout=10, allow_redirects=True)
+            response = self.session.get(base_url, headers=self.get_clean_headers(), timeout=10, allow_redirects=True)
             content = response.text[:2000]
             # Create a signature: length + hash of key elements
             self._homepage_signature = {
@@ -662,7 +666,8 @@ class EndpointDiscovery:
         for fake_endpoint in fake_endpoints:
             try:
                 url = f"{base_url.rstrip('/')}{fake_endpoint}"
-                response = self.session.get(url, headers=self.get_random_headers(), timeout=10, allow_redirects=False)
+                # Use clean headers to avoid WAF triggering false 403
+                response = self.session.get(url, headers=self.get_clean_headers(), timeout=10, allow_redirects=False)
                 
                 if response.status_code == 403:
                     return False  # Server returns 403 for non-existent files = false positive
@@ -845,7 +850,8 @@ class EndpointDiscovery:
         
         try:
             test_url = f"{base_url.rstrip('/')}{test_endpoint}"
-            response = self.session.get(test_url, headers=self.get_random_headers(), timeout=10, allow_redirects=False)
+            # Use clean headers to avoid WAF triggering false 403
+            response = self.session.get(test_url, headers=self.get_clean_headers(), timeout=10, allow_redirects=False)
             
             if response.status_code == 403:
                 return False, f"False positive (test endpoint {test_endpoint} also returns 403)"
@@ -864,8 +870,9 @@ class EndpointDiscovery:
         try:
             # Random delay to avoid rate limiting
             time.sleep(random.uniform(0.5, 1.5))
-            
-            headers = self.get_random_headers()
+
+            # Use clean headers for initial test (bypass headers can trigger WAF = false 403)
+            headers = self.get_clean_headers()
             response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
             
             # Determine if this is a directory or file

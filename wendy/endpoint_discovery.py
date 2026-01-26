@@ -433,6 +433,36 @@ class EndpointDiscovery:
         # xdg-open works on Linux, open works on macOS
         return f"xdg-open '{url}' 2>/dev/null || open '{url}'"
 
+    def _print_bypass_details(self, bypass, show_warning=False):
+        """Print formatted bypass details"""
+        method = bypass['method']
+        url = bypass['url']
+        has_custom_headers = bypass.get('bypass_headers')
+        http_method = bypass.get('http_method', 'GET')
+
+        # Show warning indicator if needed
+        warning = " ⚠️" if show_warning else ""
+        print(f"      ├─ {method}{warning}")
+
+        if show_warning and bypass.get('fp_reason'):
+            print(f"      │  ⚠️  Warning: {bypass['fp_reason']}")
+
+        if has_custom_headers:
+            for k, v in has_custom_headers.items():
+                print(f"      │  Header: {k}: {v}")
+
+        print(f"      │  Curl: {bypass['curl_command']}")
+
+        # Browser can only open GET requests without custom headers
+        if not has_custom_headers and http_method == 'GET':
+            print(f"      │  Browser: {self.generate_browser_command(url)}")
+
+        if bypass.get('preview'):
+            bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
+            print(f"      │  Preview: {bp_preview}...")
+
+        print(f"      │")
+
     def generate_download_command(self, url):
         """Generate command to download a file"""
         return f"curl -O '{url}'"
@@ -463,6 +493,127 @@ class EndpointDiscovery:
             is_html = any(marker in content_lower for marker in ['<!doctype html', '<html', '<head', '<body'])
 
         return has_non_html_ext and is_html
+
+    def get_homepage_signature(self, base_url):
+        """Fetch homepage content to use as reference for false positive detection"""
+        if hasattr(self, '_homepage_signature'):
+            return self._homepage_signature
+
+        try:
+            response = self.session.get(base_url, headers=self.get_random_headers(), timeout=10, allow_redirects=True)
+            content = response.text[:2000]
+            # Create a signature: length + hash of key elements
+            self._homepage_signature = {
+                'length': len(response.text),
+                'title': self._extract_title(content),
+                'content_sample': content[:500],
+                'content_hash': hash(content[:1000])
+            }
+        except Exception:
+            self._homepage_signature = None
+
+        return self._homepage_signature
+
+    def _extract_title(self, html_content):
+        """Extract title from HTML content"""
+        import re
+        match = re.search(r'<title[^>]*>([^<]+)</title>', html_content, re.IGNORECASE)
+        return match.group(1).strip() if match else ''
+
+    def is_directory_listing(self, content):
+        """Check if content looks like a directory listing"""
+        content_lower = content.lower()
+        # Common directory listing indicators
+        indicators = [
+            'index of',
+            'directory listing',
+            'parent directory',
+            '[dir]',
+            '[to parent directory]',
+            '<pre>',  # Apache default listing uses <pre>
+            'last modified',
+            'size  description',
+            'name</a>',
+            'href=".."',
+            'href="../"'
+        ]
+        matches = sum(1 for ind in indicators if ind in content_lower)
+        return matches >= 2  # At least 2 indicators
+
+    def is_bypass_false_positive(self, base_url, endpoint, bypass_content, bypass_url):
+        """
+        Verify if a bypass result is a false positive.
+        Returns (is_false_positive: bool, reason: str, confidence: str)
+        """
+        if not bypass_content:
+            return True, "Empty response", "high"
+
+        content_lower = bypass_content.lower()
+        endpoint_parts = [p for p in endpoint.strip('/').split('/') if p]
+        is_directory = endpoint.endswith('/')
+
+        # Check 1: Is it a real directory listing?
+        if is_directory and self.is_directory_listing(bypass_content):
+            # Verify the listing mentions files/dirs we'd expect
+            return False, "Valid directory listing detected", "high"
+
+        # Check 2: Compare with homepage
+        homepage_sig = self.get_homepage_signature(base_url)
+        if homepage_sig:
+            # Check if content is very similar to homepage
+            bypass_hash = hash(bypass_content[:1000])
+            if bypass_hash == homepage_sig['content_hash']:
+                return True, "Content identical to homepage", "high"
+
+            # Check if title matches homepage (common false positive)
+            bypass_title = self._extract_title(bypass_content)
+            if bypass_title and homepage_sig['title']:
+                if bypass_title == homepage_sig['title']:
+                    # Same title as homepage - likely false positive
+                    # Unless endpoint name is in content
+                    if endpoint_parts and not any(part.lower() in content_lower for part in endpoint_parts):
+                        return True, f"Same title as homepage: '{bypass_title}'", "medium"
+
+            # Check content length similarity (within 5%)
+            length_diff = abs(len(bypass_content) - homepage_sig['length']) / max(homepage_sig['length'], 1)
+            if length_diff < 0.05 and len(bypass_content) > 1000:
+                return True, "Content length matches homepage", "medium"
+
+        # Check 3: For directories, verify endpoint reference in content
+        if is_directory and endpoint_parts:
+            last_dir = endpoint_parts[-1].lower()
+            # A real directory listing should mention the directory name or its contents
+            if last_dir not in content_lower and 'index of' not in content_lower:
+                # Check if it's a complex HTML page (not a listing)
+                if content_lower.count('<div') > 10 or content_lower.count('<script') > 3:
+                    return True, "Complex HTML page, not a directory listing", "medium"
+
+        # Check 4: Common error page patterns that return 200
+        error_patterns = [
+            'page not found',
+            'not found',
+            '404',
+            'does not exist',
+            'error 404',
+            'file not found',
+            'nothing found',
+            'pagina non trovata',
+            'non trovato'
+        ]
+        if any(pattern in content_lower for pattern in error_patterns):
+            # But make sure it's not just mentioning 404 in another context
+            if 'page not found' in content_lower or 'error 404' in content_lower:
+                return True, "Soft 404 error page", "high"
+
+        # Check 5: For header bypasses (X-Original-URL etc), verify we're not just getting homepage
+        if '/' in bypass_url and bypass_url.rstrip('/').endswith(base_url.rstrip('/')):
+            # We requested the base URL with bypass header - verify content changed
+            if homepage_sig and len(bypass_content) > 500:
+                # If content is similar length and same title, it's the homepage
+                if abs(len(bypass_content) - homepage_sig['length']) < 100:
+                    return True, "Response is the homepage (bypass header ignored)", "high"
+
+        return False, "Appears valid", "low"
 
     def verify_403_validity(self, base_url):
         """Verify if 403 responses are real or false positives"""
@@ -610,7 +761,28 @@ class EndpointDiscovery:
         except Exception:
             pass
 
-        return bypasses
+        # Verify each bypass for false positives
+        verified_bypasses = []
+        for bypass in bypasses:
+            content = bypass.get('preview', '')
+            # Get more content for verification if available
+            is_fp, fp_reason, fp_confidence = self.is_bypass_false_positive(
+                base_url, endpoint, content, bypass['url']
+            )
+
+            bypass['is_false_positive'] = is_fp
+            bypass['fp_reason'] = fp_reason
+            bypass['fp_confidence'] = fp_confidence
+
+            if not is_fp:
+                verified_bypasses.append(bypass)
+            elif fp_confidence == 'medium':
+                # Include medium confidence false positives but mark them
+                bypass['needs_verification'] = True
+                verified_bypasses.append(bypass)
+            # High confidence false positives are excluded
+
+        return verified_bypasses
 
     def verify_403_specific(self, base_url, endpoint):
         """Verify if a specific 403 response is real by testing with random extension"""
@@ -877,25 +1049,19 @@ class EndpointDiscovery:
 
                     # Show bypasses if found (for 403s)
                     if result.get('bypasses'):
-                        print(f"\n   🚨 BYPASSES FOUND ({len(result['bypasses'])} methods):")
-                        for bypass in result['bypasses']:
-                            method = bypass['method']
-                            url = bypass['url']
-                            has_custom_headers = bypass.get('bypass_headers')
-                            http_method = bypass.get('http_method', 'GET')
+                        # Count verified vs needs-verification bypasses
+                        verified = [b for b in result['bypasses'] if not b.get('needs_verification')]
+                        needs_check = [b for b in result['bypasses'] if b.get('needs_verification')]
 
-                            print(f"      ├─ {method}")
-                            if has_custom_headers:
-                                for k, v in has_custom_headers.items():
-                                    print(f"      │  Header: {k}: {v}")
-                            print(f"      │  Curl: {bypass['curl_command']}")
-                            # Browser can only open GET requests without custom headers
-                            if not has_custom_headers and http_method == 'GET':
-                                print(f"      │  Browser: {self.generate_browser_command(url)}")
-                            if bypass.get('preview'):
-                                bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
-                                print(f"      │  Preview: {bp_preview}...")
-                            print(f"      │")
+                        if verified:
+                            print(f"\n   ✅ VERIFIED BYPASSES ({len(verified)}):")
+                            for bypass in verified:
+                                self._print_bypass_details(bypass)
+
+                        if needs_check:
+                            print(f"\n   ⚠️  BYPASSES NEEDING VERIFICATION ({len(needs_check)}):")
+                            for bypass in needs_check:
+                                self._print_bypass_details(bypass, show_warning=True)
 
             # Summary of bypasses
             if bypass_results:

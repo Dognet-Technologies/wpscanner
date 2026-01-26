@@ -1174,7 +1174,7 @@ if __name__ == "__main__":
     print("###   ###   ########## ###    #### #########     ###")          
     print("=" * 80)
     print()
-    print("🔍 WENDY - Wordpress ENDpoint discoverY")
+    print("🔍 WENDY - Wordpress ENDpoint discoverY v0.1.5")
     print("📚 For Authorized Security Testing Only")
     print("Dognet Technologies srl | info@dognet.tech")
     print()

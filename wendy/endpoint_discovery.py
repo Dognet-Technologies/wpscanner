@@ -416,18 +416,53 @@ class EndpointDiscovery:
             '/.shadow'
         ]
 
-    def generate_curl_command(self, url, method='GET', headers=None):
-        """Generate a curl command for manual testing"""
+    def generate_curl_command(self, url, method='GET', headers=None, bypass_headers=None):
+        """Generate a simplified curl command for manual testing"""
         cmd = f"curl -i -X {method} '{url}'"
-        if headers:
-            # Exclude Accept-Encoding to avoid gzip compression which curl interprets as binary
-            excluded_headers = {'Accept-Encoding'}
-            for k, v in headers.items():
-                if k in excluded_headers:
-                    continue
+
+        # Only include essential headers for bypass, not all browser headers
+        if bypass_headers:
+            for k, v in bypass_headers.items():
                 v_escaped = str(v).replace("'", "'\\''")
                 cmd += f" -H '{k}: {v_escaped}'"
+
         return cmd
+
+    def generate_browser_command(self, url):
+        """Generate command to open URL in browser"""
+        # xdg-open works on Linux, open works on macOS
+        return f"xdg-open '{url}' 2>/dev/null || open '{url}'"
+
+    def generate_download_command(self, url):
+        """Generate command to download a file"""
+        return f"curl -O '{url}'"
+
+    def is_likely_false_positive(self, endpoint, content_type, content):
+        """Check if a 200 response is likely a false positive (HTML returned for non-HTML file)"""
+        # List of extensions that should NOT return HTML
+        non_html_extensions = [
+            '.log', '.txt', '.sql', '.zip', '.tar', '.gz', '.bak', '.old',
+            '.conf', '.cfg', '.ini', '.env', '.json', '.xml', '.yml', '.yaml',
+            '.php', '.py', '.rb', '.pl', '.sh', '.bash', '.zsh',
+            '.key', '.pem', '.crt', '.cer', '.pub', '.ppk',
+            '.db', '.sqlite', '.sqlite3', '.mdb',
+            '.csv', '.tsv', '.xls', '.xlsx'
+        ]
+
+        # Check if endpoint has a non-HTML extension
+        endpoint_lower = endpoint.lower()
+        has_non_html_ext = any(endpoint_lower.endswith(ext) for ext in non_html_extensions)
+
+        # Check if response is HTML
+        is_html = False
+        if content_type:
+            is_html = 'text/html' in content_type.lower()
+        if not is_html and content:
+            # Check content for HTML markers
+            content_lower = content[:500].lower()
+            is_html = any(marker in content_lower for marker in ['<!doctype html', '<html', '<head', '<body'])
+
+        return has_non_html_ext and is_html
 
     def verify_403_validity(self, base_url):
         """Verify if 403 responses are real or false positives"""
@@ -466,11 +501,12 @@ class EndpointDiscovery:
                 response = self.session.request(method, bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
-                        'method': f'HTTP Method Bypass ({method})',
+                        'method': f'HTTP Method ({method})',
+                        'http_method': method,
                         'url': bypass_url,
                         'status': response.status_code,
                         'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method=method, headers=headers)
+                        'curl_command': self.generate_curl_command(bypass_url, method=method)
                     })
             except Exception:
                 pass
@@ -500,13 +536,14 @@ class EndpointDiscovery:
                 url = f"{base_url.rstrip('/')}/" if any(k in payload for k in ['X-Original-URL', 'X-Rewrite-URL', 'X-Forwarded-Path']) else f"{base_url.rstrip('/')}{endpoint}"
                 response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
+                    header_name = list(payload.keys())[0]
                     bypasses.append({
-                        'method': f'Header Bypass ({list(payload.keys())[0]})',
+                        'method': f'Header ({header_name})',
                         'url': url,
-                        'headers': str(payload),
+                        'bypass_headers': payload,
                         'status': response.status_code,
                         'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(url, method='GET', headers=headers)
+                        'curl_command': self.generate_curl_command(url, method='GET', bypass_headers=payload)
                     })
             except Exception:
                 pass
@@ -540,11 +577,11 @@ class EndpointDiscovery:
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
-                        'method': f'Path Variation ({variation})',
+                        'method': f'Path ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
                         'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
+                        'curl_command': self.generate_curl_command(bypass_url)
                     })
             except Exception:
                 continue
@@ -564,11 +601,11 @@ class EndpointDiscovery:
                 response = self.session.get(bypass_url, headers=headers, timeout=10, allow_redirects=False)
                 if response.status_code == 200:
                     bypasses.append({
-                        'method': f'Case Variation ({variation})',
+                        'method': f'Case ({variation})',
                         'url': bypass_url,
                         'status': response.status_code,
                         'preview': response.text[:200],
-                        'curl_command': self.generate_curl_command(bypass_url, method='GET', headers=headers)
+                        'curl_command': self.generate_curl_command(bypass_url)
                     })
         except Exception:
             pass
@@ -610,47 +647,61 @@ class EndpointDiscovery:
             headers = self.get_random_headers()
             response = self.session.get(url, headers=headers, timeout=10, allow_redirects=False)
             
+            # Determine if this is a directory or file
+            is_directory = endpoint.endswith('/')
+            content_type = response.headers.get('Content-Type', '')
+
             result = {
                 'url': url,
                 'endpoint': endpoint,
                 'status_code': response.status_code,
                 'content_length': len(response.content),
-                'content_type': response.headers.get('Content-Type', ''),
+                'content_type': content_type,
                 'server': response.headers.get('Server', ''),
                 'interesting': False,
                 'reason': '',
                 'preview': '',
                 'bypasses': [],
                 'verification': '',
-                'curl_command': self.generate_curl_command(url, headers=headers)
+                'is_directory': is_directory,
+                'is_false_positive': False,
+                'curl_command': self.generate_curl_command(url),
+                'browser_command': self.generate_browser_command(url),
+                'download_command': None if is_directory else self.generate_download_command(url)
             }
-            
+
             # Determine if endpoint is interesting
             if response.status_code == 200:
                 content = response.text[:1000]  # First 1000 chars
                 result['preview'] = content[:200]
-                
-                # Check for interesting content
-                interesting_patterns = [
-                    'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
-                    'define(', 'mysql:', 'postgres:', 
-                    'API_KEY', 'SECRET', 'TOKEN',
-                    'password', 'username', 'admin',
-                    'error', 'warning', 'exception',
-                    'stack trace', 'debug',
-                    'Index of', 'Directory listing',
-                    '<?php', '<?xml', '{', '[',
-                    'SQL', 'SELECT', 'INSERT', 'UPDATE',
-                    'wp_', 'wordpress', 'admin',
-                    'version', 'changelog'
-                ]
-                
-                content_lower = content.lower()
-                for pattern in interesting_patterns:
-                    if pattern.lower() in content_lower:
-                        result['interesting'] = True
-                        result['reason'] = f"Contains: {pattern}"
-                        break
+
+                # Check for false positive (HTML response for non-HTML file)
+                if self.is_likely_false_positive(endpoint, content_type, content):
+                    result['is_false_positive'] = True
+                    result['interesting'] = False
+                    result['reason'] = "Likely false positive (HTML returned for non-HTML file)"
+                else:
+                    # Check for interesting content
+                    interesting_patterns = [
+                        'DB_PASSWORD', 'DB_USER', 'DB_NAME', 'DB_HOST',
+                        'define(', 'mysql:', 'postgres:',
+                        'API_KEY', 'SECRET', 'TOKEN',
+                        'password', 'username', 'admin',
+                        'error', 'warning', 'exception',
+                        'stack trace', 'debug',
+                        'Index of', 'Directory listing',
+                        '<?php', '<?xml', '{', '[',
+                        'SQL', 'SELECT', 'INSERT', 'UPDATE',
+                        'wp_', 'wordpress', 'admin',
+                        'version', 'changelog'
+                    ]
+
+                    content_lower = content.lower()
+                    for pattern in interesting_patterns:
+                        if pattern.lower() in content_lower:
+                            result['interesting'] = True
+                            result['reason'] = f"Contains: {pattern}"
+                            break
                 
             elif response.status_code == 403:
                 # FIRST: Verify if the 403 is real using the random suffix method
@@ -788,59 +839,77 @@ class EndpointDiscovery:
                     bypass_results.extend(result['bypasses'])
             
             for status, results in by_status.items():
-                print(f"\n📋 Status {status} ({len(results)} endpoints):")
-                for result in results:
-                    print(f"   • {result['endpoint']}")
-                    print(f"     Reason: {result.get('reason', 'N/A')}")
+                print(f"\n{'─' * 60}")
+                print(f"  STATUS {status} ({len(results)} endpoints)")
+                print(f"{'─' * 60}")
 
-                    # Don't show curl command for redirects (301, 302) - manual test not needed
-                    if result.get('curl_command') and result['status_code'] not in (301, 302):
-                        print(f"     Manual Test: {result['curl_command']}")
-                    
-                    # Show verification info for 403s
+                for result in results:
+                    endpoint = result['endpoint']
+                    reason = result.get('reason', 'N/A')
+                    is_dir = result.get('is_directory', endpoint.endswith('/'))
+
+                    # Print endpoint header
+                    icon = "📁" if is_dir else "📄"
+                    print(f"\n{icon} {endpoint}")
+                    print(f"   └─ {reason}")
+
+                    # Skip manual test commands for redirects
+                    if result['status_code'] in (301, 302):
+                        continue
+
+                    # Show verification for 403s
                     if result.get('verification'):
-                        print(f"     Verification: {result['verification']}")
-                    
-                    if result.get('preview'):
-                        preview = result['preview'][:100].replace('\n', ' ')
-                        print(f"     Preview: {preview}...")
-                    
-                    # Show bypasses if found
+                        print(f"   └─ Verification: {result['verification']}")
+
+                    # Show preview if available (and not a false positive warning)
+                    if result.get('preview') and not result.get('is_false_positive'):
+                        preview = result['preview'][:80].replace('\n', ' ').strip()
+                        print(f"   └─ Preview: {preview}...")
+
+                    # Show quick actions
+                    print(f"   └─ Actions:")
+                    if result.get('browser_command'):
+                        print(f"      • Open in browser: {result['browser_command']}")
+                    if result.get('download_command') and not is_dir:
+                        print(f"      • Download: {result['download_command']}")
+                    if result.get('curl_command'):
+                        print(f"      • Curl: {result['curl_command']}")
+
+                    # Show bypasses if found (for 403s)
                     if result.get('bypasses'):
-                        print(f"     🚨 BYPASSES FOUND ({len(result['bypasses'])}):")
+                        print(f"\n   🚨 BYPASSES FOUND ({len(result['bypasses'])} methods):")
                         for bypass in result['bypasses']:
-                            print(f"       - {bypass['method']}: {bypass['status']}")
-                            if bypass.get('curl_command'):
-                                print(f"         Manual Test: {bypass['curl_command']}")
-                            if 'headers' in bypass:
-                                print(f"         Headers: {bypass['headers']}")
+                            method = bypass['method']
+                            url = bypass['url']
+                            print(f"      ├─ {method}")
+                            if bypass.get('bypass_headers'):
+                                for k, v in bypass['bypass_headers'].items():
+                                    print(f"      │  Header: {k}: {v}")
+                            print(f"      │  Curl: {bypass['curl_command']}")
+                            print(f"      │  Browser: {self.generate_browser_command(url)}")
                             if bypass.get('preview'):
-                                bp_preview = bypass['preview'][:80].replace('\n', ' ')
-                                print(f"         Preview: {bp_preview}...")
-                    print()
-            
+                                bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
+                                print(f"      │  Preview: {bp_preview}...")
+                            print(f"      │")
+
             # Summary of bypasses
             if bypass_results:
-                print("\n🚨 403 BYPASS SUMMARY")
-                print("=" * 50)
-                print(f"✅ Found {len(bypass_results)} successful bypasses!")
-                
-                # Group bypasses by method
+                print(f"\n{'=' * 60}")
+                print("  403 BYPASS SUMMARY")
+                print(f"{'=' * 60}")
+                print(f"  Found {len(bypass_results)} successful bypass techniques\n")
+
+                # Group bypasses by method type
                 bypass_methods = {}
                 for bypass in bypass_results:
                     method = bypass['method']
                     if method not in bypass_methods:
                         bypass_methods[method] = 0
                     bypass_methods[method] += 1
-                
-                print("📊 Bypass techniques that worked:")
-                for method, count in bypass_methods.items():
-                    print(f"   - {method}: {count} endpoint(s)")
-                
-                print("\n🔧 Recommended actions:")
-                print("   1. Test bypassed endpoints manually for sensitive data")
-                print("   2. Use successful bypass techniques on other targets")
-                print("   3. Document bypass methods for reporting")
+
+                print("  Techniques that worked:")
+                for method, count in sorted(bypass_methods.items(), key=lambda x: -x[1]):
+                    print(f"    • {method}: {count} endpoint(s)")
         
         else:
             print("❌ No interesting endpoints found")

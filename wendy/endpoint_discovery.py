@@ -420,7 +420,11 @@ class EndpointDiscovery:
         """Generate a curl command for manual testing"""
         cmd = f"curl -i -X {method} '{url}'"
         if headers:
+            # Exclude Accept-Encoding to avoid gzip compression which curl interprets as binary
+            excluded_headers = {'Accept-Encoding'}
             for k, v in headers.items():
+                if k in excluded_headers:
+                    continue
                 v_escaped = str(v).replace("'", "'\\''")
                 cmd += f" -H '{k}: {v_escaped}'"
         return cmd
@@ -788,8 +792,9 @@ class EndpointDiscovery:
                 for result in results:
                     print(f"   • {result['endpoint']}")
                     print(f"     Reason: {result.get('reason', 'N/A')}")
-                    
-                    if result.get('curl_command'):
+
+                    # Don't show curl command for redirects (301, 302) - manual test not needed
+                    if result.get('curl_command') and result['status_code'] not in (301, 302):
                         print(f"     Manual Test: {result['curl_command']}")
                     
                     # Show verification info for 403s

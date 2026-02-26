@@ -453,8 +453,9 @@ class EndpointDiscovery:
 
         print(f"      │  Curl: {bypass['curl_command']}")
 
-        # Browser can only open GET requests without custom headers
+        # Download and Browser only for GET requests without custom headers
         if not has_custom_headers and http_method == 'GET':
+            print(f"      │  Download: {self.generate_download_command(url)}")
             print(f"      │  Browser: {self.generate_browser_command(url)}")
 
         if bypass.get('preview'):
@@ -1088,13 +1089,12 @@ class EndpointDiscovery:
                         print(f"   └─ Preview: {preview}...")
 
                     # Show quick actions
-                    print(f"   └─ Actions:")
-                    if result.get('browser_command'):
-                        print(f"      • Open in browser: {result['browser_command']}")
-                    if result.get('download_command') and not is_dir:
-                        print(f"      • Download: {result['download_command']}")
-                    if result.get('curl_command'):
-                        print(f"      • Curl: {result['curl_command']}")
+                    if result['status_code'] != 403:
+                        # For non-403 endpoints show only download (browser/curl are not useful)
+                        if result.get('download_command') and not is_dir:
+                            print(f"   └─ Actions:")
+                            print(f"      • Download: {result['download_command']}")
+                    # For 403 endpoints the bypass section below already contains all actionable commands
 
                     # Show bypasses if found (for 403s)
                     if result.get('bypasses'):
@@ -1114,22 +1114,45 @@ class EndpointDiscovery:
 
             # Summary of bypasses
             if bypass_results:
+                # Count unique endpoints with at least one bypass
+                endpoints_with_bypass = len([r for r in all_interesting if r.get('bypasses')])
+
                 print(f"\n{'=' * 60}")
                 print("  403 BYPASS SUMMARY")
                 print(f"{'=' * 60}")
-                print(f"  Found {len(bypass_results)} successful bypass techniques\n")
+                print(f"  Found {len(bypass_results)} bypass techniques across {endpoints_with_bypass} endpoint(s)\n")
 
-                # Group bypasses by method type
-                bypass_methods = {}
+                # Categorise bypasses
+                categories = {
+                    'HTTP Methods':    {},
+                    'Path Manipulation': {},
+                    'Header Injection': {},
+                    'Case Variation':   {},
+                    'Other':           {},
+                }
+                cat_map = {
+                    'HTTP Method': 'HTTP Methods',
+                    'Path':        'Path Manipulation',
+                    'Header':      'Header Injection',
+                    'Case':        'Case Variation',
+                }
                 for bypass in bypass_results:
                     method = bypass['method']
-                    if method not in bypass_methods:
-                        bypass_methods[method] = 0
-                    bypass_methods[method] += 1
+                    cat = 'Other'
+                    for prefix, label in cat_map.items():
+                        if method.startswith(prefix):
+                            cat = label
+                            break
+                    categories[cat][method] = categories[cat].get(method, 0) + 1
 
-                print("  Techniques that worked:")
-                for method, count in sorted(bypass_methods.items(), key=lambda x: -x[1]):
-                    print(f"    • {method}: {count} endpoint(s)")
+                for cat_name, techniques in categories.items():
+                    if not techniques:
+                        continue
+                    total = sum(techniques.values())
+                    print(f"  ┌─ {cat_name} ({total} bypass(es))")
+                    for method, count in sorted(techniques.items(), key=lambda x: -x[1]):
+                        print(f"  │  • {method}: {count} endpoint(s)")
+                    print(f"  │")
         
         else:
             print("❌ No interesting endpoints found")

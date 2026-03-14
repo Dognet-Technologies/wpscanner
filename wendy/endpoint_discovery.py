@@ -1363,16 +1363,30 @@ class EndpointDiscovery:
                     })
             cve_findings.sort(key=lambda x: x['cvss'], reverse=True)
 
-        if cve_findings:
-            for f in cve_findings:
-                certain_tag = '' if f.get('certain', True) else f" {C.DIM}(version unknown - possible){C.RESET}"
+        confirmed = [f for f in cve_findings if f.get('certain', True)]
+        possible  = [f for f in cve_findings if not f.get('certain', True)]
+
+        if confirmed:
+            for f in confirmed:
+                src = f"  {C.DIM}[{f['source']}]{C.RESET}" if f.get('source') else ''
                 sev = sev_color(f['severity'])
                 print(f"  {C.RED}⚠{C.RESET} {sev} "
-                      f"{C.BOLD}{f['slug']}{C.RESET} v{f['version']}{certain_tag}")
+                      f"{C.BOLD}{f['slug']}{C.RESET} v{f['version']}{src}")
                 print(f"     {f['cve']}  CVSS {f['cvss']}  {f['desc']}")
         else:
-            print(f"  {C.GREEN}✓{C.RESET} No known CVEs matched for detected plugins")
+            print(f"  {C.GREEN}✓{C.RESET} No confirmed CVEs for detected plugins")
             self.vprint(f"  {C.DIM}(CVE database covers {len(EFFECTIVE_CVE_DB)} plugin families){C.RESET}", level=1)
+
+        # "Possible" entries (version not readable) shown only in verbose mode
+        if possible:
+            if self.verbosity >= 1:
+                print(f"\n  {C.DIM}── Possible findings (version could not be read) ──{C.RESET}")
+                for f in possible:
+                    sev = sev_color(f['severity'])
+                    print(f"  {C.DIM}⚠ {sev} {f['slug']}  {f['cve']}  CVSS {f['cvss']}{C.RESET}")
+            else:
+                print(f"  {C.DIM}ℹ  {len(possible)} additional finding(s) where plugin version"
+                      f" could not be read — run with -v to show{C.RESET}")
 
         # ── PHASE 3: SECURITY HEADERS ────────────────────────────────────────
         self._section(3, TOTAL_PHASES, "Security Headers")

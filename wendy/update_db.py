@@ -182,6 +182,104 @@ def parse_feed(data):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# AUTO-UPDATE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+UPDATE_INTERVAL_DAYS = 7
+
+
+def db_age_days(path=DB_PATH):
+    """
+    Return how many days ago the DB was last updated, or None if unknown.
+    Reads the _meta.updated field from cve_db.json without loading the whole file.
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding='utf-8') as f:
+            raw = json.load(f)
+        updated_str = raw.get('_meta', {}).get('updated', '')
+        if not updated_str:
+            return None
+        updated_dt = datetime.datetime.strptime(updated_str, '%Y-%m-%dT%H:%M:%SZ')
+        delta = datetime.datetime.utcnow() - updated_dt
+        return delta.days
+    except Exception:
+        return None
+
+
+def needs_update(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS):
+    """Return True if the DB is absent or older than max_age_days."""
+    if not os.path.exists(path):
+        return True
+    age = db_age_days(path)
+    if age is None:
+        return True
+    return age >= max_age_days
+
+
+def run_db_update(path=DB_PATH, verbose=True):
+    """
+    Fetch the Wordfence feed and save it to path.
+    Returns (ok: bool, message: str).
+    """
+    import re as _re
+    global re
+    import re
+
+    try:
+        data = fetch_feed(timeout=90)
+    except Exception as e:
+        return False, f"Fetch failed: {e}"
+
+    try:
+        db, _ = parse_feed(data)
+        meta  = save_db(db, path=path)
+    except Exception as e:
+        return False, f"Parse/save failed: {e}"
+
+    total = meta['entries']
+    plugins = meta['plugins']
+    return True, f"{plugins:,} plugins, {total:,} CVE entries saved to {path}"
+
+
+def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True):
+    """
+    Check if the CVE DB needs updating and do so automatically.
+
+    verbose=True  → print status line(s) to stdout
+    verbose=False → completely silent
+
+    Returns (updated: bool, message: str).
+    """
+    if not needs_update(path, max_age_days):
+        age = db_age_days(path)
+        msg = f"CVE DB up to date (updated {age}d ago)"
+        if verbose:
+            print(f"  {msg}")
+        return False, msg
+
+    age = db_age_days(path)
+    if age is None:
+        reason = "not found" if not os.path.exists(path) else "timestamp unreadable"
+    else:
+        reason = f"last update {age}d ago"
+
+    if verbose:
+        print(f"  [CVE DB] Auto-updating ({reason})...", end=' ', flush=True)
+
+    ok, msg = run_db_update(path=path, verbose=False)
+
+    if verbose:
+        if ok:
+            print(f"done  ({msg})")
+        else:
+            print(f"FAILED  ({msg})")
+
+    return ok, msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SAVE / LOAD
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -1648,23 +1648,59 @@ class EndpointDiscovery:
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _do_self_update():
+    """
+    Pull latest code from the git remote.
+    Returns (ok: bool, output: str).
+    """
+    import subprocess
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        result = subprocess.run(
+            ['git', 'pull'],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        out = (result.stdout + result.stderr).strip()
+        return result.returncode == 0, out
+    except FileNotFoundError:
+        return False, "git not found in PATH"
+    except subprocess.TimeoutExpired:
+        return False, "git pull timed out"
+    except Exception as e:
+        return False, str(e)
+
+
 def main():
     import argparse
+    from wendy.update_db import auto_update_if_needed, run_db_update, DB_PATH
 
     parser = argparse.ArgumentParser(
         prog='wendy',
-        description='WENDY - WordPress ENDpoint discoverY v0.2.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
+        description='WENDY - WordPress ENDpoint discoverY v0.3.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('url', help='Target WordPress URL (e.g. https://example.com)')
+    parser.add_argument('url', nargs='?', default=None,
+                        help='Target WordPress URL (e.g. https://example.com)')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                         help='-v: verbose output  -vv: full debug output')
     parser.add_argument('--aggressive', action='store_true',
                         help='Aggressive mode: wider coverage, more checks, more workers')
+    parser.add_argument('-u', '--update', action='store_true',
+                        help='Update WENDY (git pull) and the CVE database, then exit '
+                             '(or continue scanning if URL is also given)')
 
     args = parser.parse_args()
+
+    if not args.url and not args.update:
+        parser.print_help()
+        sys.exit(0)
+
     verbosity = min(args.verbose, 2)
 
+    # ── Banner ────────────────────────────────────────────────────────────────
     print("=" * 72)
     print()
     print("    :::       ::: :::::::::: ::::    ::: :::::::::  :::   :::")
@@ -1675,11 +1711,44 @@ def main():
     print("#+#+# #+#+#  #+#        #+#   #+#+# #+#    #+#    #+#")
     print("###   ###   ########## ###    #### #########     ###")
     print()
-    print("  WENDY - WordPress ENDpoint discoverY  v0.2.0")
+    print("  WENDY - WordPress ENDpoint discoverY  v0.3.0")
     print("  Dognet Technologies srl | info@dognet.tech")
     print("  For Authorized Security Testing Only")
     print()
     print("=" * 72)
+
+    # ── Explicit update (-u / --update) ──────────────────────────────────────
+    if args.update:
+        print(f"\n{C.BOLD}  [UPDATE] WENDY self-update{C.RESET}")
+        print(f"  {'─'*56}")
+
+        print(f"  Pulling latest code from git...", end=' ', flush=True)
+        ok, out = _do_self_update()
+        if ok:
+            # Show only first meaningful line (e.g. "Already up to date." or "Updating abc..def")
+            first_line = out.splitlines()[0] if out else 'done'
+            print(f"{C.GREEN}{first_line}{C.RESET}")
+        else:
+            print(f"{C.YELLOW}warning: {out}{C.RESET}")
+
+        print(f"\n  Updating CVE database from Wordfence Intelligence...")
+        ok_db, msg_db = run_db_update(path=DB_PATH, verbose=False)
+        if ok_db:
+            print(f"  {C.GREEN}✓{C.RESET}  {msg_db}")
+        else:
+            print(f"  {C.YELLOW}⚠{C.RESET}  {msg_db}")
+
+        print()
+        if not args.url:
+            sys.exit(0 if ok_db else 1)
+
+    # ── Auto-update CVE DB silently if needed (weekly) ────────────────────────
+    if not args.update:
+        # Only auto-update when doing a normal scan (not already done above)
+        auto_update_if_needed(path=DB_PATH, verbose=False)
+
+    if not args.url:
+        sys.exit(0)
 
     scanner = EndpointDiscovery(verbosity=verbosity, aggressive=args.aggressive)
     scanner.run_full_scan(args.url)

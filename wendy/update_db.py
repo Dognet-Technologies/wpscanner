@@ -3,16 +3,21 @@
 WENDY CVE Database Updater v0.3.0
 Dognet Technologies srl | info@dognet.tech
 
-Fetches WordPress plugin vulnerability data from Wordfence Intelligence
-(public feed, no authentication required) and saves to wendy/cve_db.json.
+Fetches WordPress plugin vulnerability data from Wordfence Intelligence v3
+(token-based authentication required) and saves to wendy/cve_db.json.
 
-Source: https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production/
+Source: https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production/
 License for data: https://www.wordfence.com/wordfence-intelligence-terms-and-conditions/
 
+Authentication:
+    Set the WORDFENCE_API_KEY environment variable to your Wordfence Intelligence
+    API key before running. Obtain a free key from your Wordfence.com account
+    under Account → Integrations.
+
 Usage:
-    python -m wendy.update_db
-    python wendy/update_db.py              # full update
-    python wendy/update_db.py --dry-run    # fetch only, don't save
+    WORDFENCE_API_KEY=your_key python -m wendy.update_db
+    WORDFENCE_API_KEY=your_key python wendy/update_db.py   # full update
+    WORDFENCE_API_KEY=your_key python wendy/update_db.py --dry-run
 
 Intended to run weekly (cron or CI). The generated cve_db.json is gitignored
 and must be regenerated locally after each clone.
@@ -29,7 +34,7 @@ import requests
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-FEED_URL = "https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production/"
+FEED_URL = "https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production/"
 DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cve_db.json")
 
 # Only include CVEs at or above this CVSS score (0.0 = include all)
@@ -69,17 +74,44 @@ def _max_version(versions):
 # FEED FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_feed(timeout=90):
-    """Fetch the full Wordfence Intelligence vulnerability feed."""
+def fetch_feed(timeout=90, api_key=None):
+    """Fetch the full Wordfence Intelligence v3 vulnerability feed.
+
+    Requires a valid API key. Pass via the api_key argument or set the
+    WORDFENCE_API_KEY environment variable.
+    """
+    key = api_key or os.environ.get('WORDFENCE_API_KEY', '').strip()
+    if not key:
+        raise RuntimeError(
+            "Wordfence API key required for v3 feed.\n"
+            "  Set the WORDFENCE_API_KEY environment variable or pass --api-key.\n"
+            "  Obtain a free key at: https://www.wordfence.com (Account → Integrations)"
+        )
+
     print(f"  Fetching: {FEED_URL}")
     r = requests.get(
         FEED_URL,
         timeout=timeout,
         headers={
-            'User-Agent':  'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)',
-            'Accept':      'application/json',
+            'User-Agent':     'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)',
+            'Accept':         'application/json',
+            'Authorization':  f'Bearer {key}',
         }
     )
+    if r.status_code == 401:
+        raise RuntimeError(
+            "HTTP 401 Unauthorized — API key is missing or invalid.\n"
+            "  Check your WORDFENCE_API_KEY environment variable."
+        )
+    if r.status_code == 403:
+        raise RuntimeError(
+            "HTTP 403 Forbidden — API key does not have access to this feed."
+        )
+    if r.status_code == 429:
+        raise RuntimeError(
+            "HTTP 429 Too Many Requests — rate limit reached.\n"
+            "  Wait before retrying, or contact wfi-support@wordfence.com for a higher limit."
+        )
     if r.status_code == 410:
         raise RuntimeError(
             f"Feed returned HTTP 410 Gone — the Wordfence Intelligence endpoint\n"
@@ -162,13 +194,18 @@ def parse_feed(data):
             max_vuln = _max_version(concrete_to_versions)
 
             # ── CVE / severity ────────────────────────────────────────────
-            cve_id   = (vuln.get('cve') or '').strip()
-            severity = (vuln.get('cvss_rating') or 'medium').upper()
+            cve_id    = (vuln.get('cve') or '').strip()
+            cvss_data = vuln.get('cvss')
+
+            # v3: rating lives inside the cvss object as cvss.rating
+            if isinstance(cvss_data, dict):
+                severity = (cvss_data.get('rating') or 'medium').upper()
+            else:
+                severity = 'MEDIUM'
             if severity == 'NONE':
                 severity = 'INFO'
 
             cvss_score = 0.0
-            cvss_data  = vuln.get('cvss')
             if isinstance(cvss_data, dict):
                 try:
                     cvss_score = float(cvss_data.get('score') or 0)
@@ -224,7 +261,7 @@ def needs_update(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS):
     return age >= max_age_days
 
 
-def run_db_update(path=DB_PATH, verbose=True):
+def run_db_update(path=DB_PATH, verbose=True, api_key=None):
     """
     Fetch the Wordfence feed and save it to path.
     Returns (ok: bool, message: str).
@@ -234,7 +271,7 @@ def run_db_update(path=DB_PATH, verbose=True):
     import re
 
     try:
-        data = fetch_feed(timeout=90)
+        data = fetch_feed(timeout=90, api_key=api_key)
     except Exception as e:
         return False, f"Fetch failed: {e}"
 
@@ -249,7 +286,7 @@ def run_db_update(path=DB_PATH, verbose=True):
     return True, f"{plugins:,} plugins, {total:,} CVE entries saved to {path}"
 
 
-def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True):
+def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True, api_key=None):
     """
     Check if the CVE DB needs updating and do so automatically.
 
@@ -274,7 +311,7 @@ def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbo
     if verbose:
         print(f"  [CVE DB] Auto-updating ({reason})...", end=' ', flush=True)
 
-    ok, msg = run_db_update(path=path, verbose=False)
+    ok, msg = run_db_update(path=path, verbose=False, api_key=api_key)
 
     if verbose:
         if ok:
@@ -326,22 +363,27 @@ def main():
     import re
 
     parser = argparse.ArgumentParser(
-        description='Update WENDY CVE database from Wordfence Intelligence public feed'
+        description='Update WENDY CVE database from Wordfence Intelligence v3 feed'
     )
     parser.add_argument('--dry-run', action='store_true',
                         help='Fetch and parse but do not write cve_db.json')
     parser.add_argument('--output', default=DB_PATH, metavar='PATH',
                         help=f'Output path (default: {DB_PATH})')
+    parser.add_argument('--api-key', default=None, metavar='KEY',
+                        help='Wordfence Intelligence API key (overrides WORDFENCE_API_KEY env var)')
     args = parser.parse_args()
+
+    api_key = args.api_key or os.environ.get('WORDFENCE_API_KEY', '').strip()
 
     print("WENDY CVE Database Updater")
     print(f"Source : {FEED_URL}")
     print(f"Output : {args.output}")
+    print(f"Auth   : {'key provided' if api_key else 'NO KEY — set WORDFENCE_API_KEY'}")
     print()
 
     # Fetch
     try:
-        data = fetch_feed()
+        data = fetch_feed(api_key=api_key)
     except requests.exceptions.Timeout:
         print("ERROR: Request timed out. Retry or check connectivity.", file=sys.stderr)
         sys.exit(1)

@@ -417,12 +417,19 @@ class EndpointDiscovery:
             if r and r.status_code == 200:
                 content_type = r.headers.get('Content-Type', '')
                 if 'text/html' not in content_type:
+                    # Actual text file → plugin confirmed
                     ver = _extract_version_from_readme(r.text)
+                    return slug, ver
+                elif _baseline_status == 200:
+                    # Soft-404 server: HTML readme.txt = page doesn't exist
+                    return None, None
                 else:
+                    # Non-soft-404 server with HTML readme: unusual but possible,
+                    # fall through to _get_plugin_version for further confirmation
                     ver = self._get_plugin_version(base_url, slug)
-                return slug, ver
-            # Fallback: directory listing enabled (200)
-            if r and r.status_code != _baseline_status:
+                    return slug, ver
+            elif r and r.status_code != _baseline_status:
+                # Status differs from baseline → real response (e.g. 403 while baseline=404)
                 dir_url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/"
                 r2 = self._safe_get(dir_url, timeout=6)
                 if r2 and r2.status_code == 200:
@@ -466,10 +473,18 @@ class EndpointDiscovery:
             style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
             r = self._safe_get(style_url, timeout=5)
             if r and r.status_code == 200:
-                themes_found[slug] = None
-                print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
-            else:
-                print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
+                content_type = r.headers.get('Content-Type', '')
+                # style.css is never HTML; HTML response = soft-404
+                if 'text/html' not in content_type:
+                    themes_found[slug] = None
+                    print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+                    continue
+                elif _baseline_theme_status != 200:
+                    # Non-soft-404 server with odd content-type, still count it
+                    themes_found[slug] = None
+                    print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+                    continue
+            print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
         print(flush=True)
 
         return found, themes_found
@@ -1462,7 +1477,7 @@ class EndpointDiscovery:
         print(f"  {C.GREEN}✓{C.RESET} {len(plugins_found)} plugin(s) detected"
               f"  {len(themes_found)} theme(s) detected")
 
-        if self.verbosity >= 1:
+        if self.verbosity >= 2:
             for slug, ver in sorted(plugins_found.items()):
                 print(f"    {C.DIM}plugin: {slug}  {('v'+ver) if ver else '(ver unknown)'}{C.RESET}")
             for slug in sorted(themes_found.keys()):

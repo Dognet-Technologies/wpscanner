@@ -704,14 +704,14 @@ class EndpointDiscovery:
 
         # Check user registration
         r_reg = self._safe_get(f"{base_url.rstrip('/')}/wp-login.php?action=register")
-        if r_reg and r_reg.status_code == 200:
+        if r_reg and r_reg.status_code == 200 and not self._matches_homepage(r_reg, base_url):
             if 'registerform' in r_reg.text.lower() or 'user_login' in r_reg.text:
                 findings.append({'severity': 'MEDIUM', 'title': 'User registration open',
                                   'desc': 'Anyone can register an account on this WordPress site'})
 
         # Check REST API exposes users unauthenticated
         r_rest = self._safe_get(f"{base_url.rstrip('/')}/wp-json/wp/v2/users")
-        if r_rest and r_rest.status_code == 200:
+        if r_rest and r_rest.status_code == 200 and not self._matches_homepage(r_rest, base_url):
             try:
                 data = r_rest.json()
                 if isinstance(data, list) and len(data) > 0:
@@ -727,11 +727,14 @@ class EndpointDiscovery:
                 findings.append({'severity': 'MEDIUM', 'title': 'No HTTPS redirect',
                                   'desc': 'Site does not redirect HTTP to HTTPS'})
 
+        # Warm up homepage baseline before the loop (cached after first call)
+        self.get_homepage_signature(base_url)
+
         for path, bad_cond, severity, title, desc in checks:
             r = self._safe_get(base_url.rstrip('/') + path)
             if r:
                 try:
-                    if bad_cond(r):
+                    if bad_cond(r) and not self._matches_homepage(r, base_url):
                         findings.append({'severity': severity, 'title': title,
                                          'desc': desc, 'url': base_url.rstrip('/') + path})
                 except Exception:
@@ -771,10 +774,80 @@ class EndpointDiscovery:
                 'length':        len(r.text),
                 'title':         self._extract_title(content),
                 'content_hash':  hash(content[:1000]),
+                'final_url':     r.url.rstrip('/'),
             }
         except Exception:
             self._homepage_signature = None
         return self._homepage_signature
+
+    def _matches_homepage(self, r, base_url):
+        """
+        Return True if the response appears to be the homepage served as a soft
+        404/redirect — i.e., the path doesn't actually exist but the server
+        returns the homepage content instead of a real resource.
+
+        Uses three independent signals (any one is enough):
+          1. Content hash of first 1 KB matches homepage
+          2. Body length within 5 % of homepage length (and body is large enough
+             to rule out trivially small real files)
+          3. <title> tag identical to homepage title
+        """
+        if not r:
+            return False
+        sig = self.get_homepage_signature(base_url)
+        if not sig:
+            return False
+
+        text = r.text
+
+        # Signal 1 – identical content hash
+        if hash(text[:1000]) == sig['content_hash']:
+            return True
+
+        # Signal 2 – body length within 5 % of homepage (only for large bodies)
+        hp_len = sig['length']
+        if hp_len > 1000:
+            diff = abs(len(text) - hp_len) / hp_len
+            if diff < 0.05:
+                return True
+
+        # Signal 3 – same page title
+        page_title = self._extract_title(text[:2000])
+        if page_title and sig['title'] and page_title == sig['title']:
+            return True
+
+        return False
+
+    def _is_homepage_redirect(self, base_url, location):
+        """
+        Return True if a 301/302 Location header points to the site homepage,
+        indicating a soft-404 redirect rather than a real resource redirect.
+        """
+        if not location:
+            return False
+
+        def _norm(u):
+            """Strip scheme, trailing slash, and common index pages."""
+            u = re.sub(r'^https?://', '', u).rstrip('/')
+            u = re.sub(r'/index\.(php|html?)$', '', u)
+            return u.lower()
+
+        base_norm = _norm(base_url)
+        loc_norm  = _norm(location)
+
+        # Direct homepage match
+        if loc_norm == base_norm:
+            return True
+
+        # Redirect to bare root path ("/", "")
+        if location.strip('/') == '':
+            return True
+
+        # Redirect to homepage with query string (e.g. ?p=0)
+        if loc_norm.startswith(base_norm + '?'):
+            return True
+
+        return False
 
     def _extract_title(self, html):
         m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
@@ -1252,8 +1325,14 @@ class EndpointDiscovery:
                     result['reason'] = "False positive 403"
 
             elif response.status_code in (301, 302):
-                result['interesting'] = True
-                result['reason'] = f"Redirect → {response.headers.get('Location','?')}"
+                location = response.headers.get('Location', '')
+                if self._is_homepage_redirect(base_url, location):
+                    # Soft-404: server redirects everything to homepage
+                    result['interesting'] = False
+                    result['reason'] = f"Soft redirect to homepage"
+                else:
+                    result['interesting'] = True
+                    result['reason'] = f"Redirect → {location}"
 
             return result
 

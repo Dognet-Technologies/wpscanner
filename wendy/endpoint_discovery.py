@@ -149,15 +149,20 @@ CVE_DATABASE = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROBE PRIORITY SETTINGS
+# PROBE CONFIGURATION  (read from wendy/.keys / env, see .keys.example)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Max slugs to probe in normal (non-aggressive) mode
-NORMAL_MODE_PROBE_LIMIT  = 3000
-NORMAL_MODE_THEME_LIMIT  = 100
+try:
+    from wendy.config import load_probe_config
+except ImportError:
+    from config import load_probe_config
 
-# CVE years considered "recent" → extra priority score
-RECENT_CVE_YEARS = {2024, 2025, 2026}
+_PROBE_CFG = load_probe_config()
+
+NORMAL_MODE_PROBE_LIMIT  = _PROBE_CFG['probe_normal_limit']
+NORMAL_MODE_THEME_LIMIT  = _PROBE_CFG['probe_theme_limit']
+RECENT_CVE_YEARS         = _PROBE_CFG['cve_years']
+MIN_ACTIVE_INSTALLS      = _PROBE_CFG['min_active_installs']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LIVE CVE DATABASE LOADER
@@ -168,28 +173,30 @@ RECENT_CVE_YEARS = {2024, 2025, 2026}
 
 def _load_cve_db():
     """
-    Load and merge plugin/theme CVE databases and popular lists from cve_db.json.
+    Load and merge plugin/theme CVE databases, installs index, and popular
+    theme list from cve_db.json.
 
-    Returns (db_plugins, db_themes, popular_plugins, popular_themes).
-    db_plugins merges embedded CVE_DATABASE with the JSON file.
-    db_themes and popular lists come exclusively from the JSON file (no embedded fallback).
-    Falls back to (CVE_DATABASE, {}, [], []) when the file is absent/corrupt.
+    Returns (db_plugins, db_themes, installs_index, popular_themes).
+      db_plugins     – merged embedded CVE_DATABASE + JSON plugin entries
+      db_themes      – theme CVE entries from JSON  (no embedded fallback)
+      installs_index – {slug: active_installs} from WordPress.org (may be empty)
+      popular_themes – [slug, ...] ordered by active_installs
+    Falls back to (CVE_DATABASE, {}, {}, []) when the file is absent/corrupt.
     """
     json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cve_db.json')
     if not os.path.exists(json_path):
-        return CVE_DATABASE, {}, [], []
+        return CVE_DATABASE, {}, {}, []
 
     try:
         with open(json_path, encoding='utf-8') as fh:
             raw = json.load(fh)
     except Exception:
-        return CVE_DATABASE, {}, [], []   # corrupted file → fall back
+        return CVE_DATABASE, {}, {}, []
 
-    # Extract auxiliary sections before they get merged into the plugin DB
-    meta            = raw.pop('_meta',   {})
-    db_themes_raw   = raw.pop('_themes', {})
-    popular_plugins = meta.get('popular_plugins', [])
-    popular_themes  = meta.get('popular_themes',  [])
+    meta           = raw.pop('_meta',   {})
+    db_themes_raw  = raw.pop('_themes', {})
+    installs_index = meta.get('installs_index', {})
+    popular_themes = meta.get('popular_themes',  [])
 
     # Build plugin DB: embedded entries take priority
     db = {slug: list(entries) for slug, entries in CVE_DATABASE.items()}
@@ -206,52 +213,84 @@ def _load_cve_db():
             db.setdefault(slug, []).append(tuple(entry))
 
     # Build theme DB
-    db_themes = {}
-    for slug, entries in db_themes_raw.items():
-        db_themes[slug] = [tuple(e) for e in entries if isinstance(e, list) and len(e) >= 5]
+    db_themes = {
+        slug: [tuple(e) for e in entries if isinstance(e, list) and len(e) >= 5]
+        for slug, entries in db_themes_raw.items()
+    }
 
-    return db, db_themes, popular_plugins, popular_themes
+    return db, db_themes, installs_index, popular_themes
 
 
-EFFECTIVE_CVE_DB, EFFECTIVE_THEME_CVE_DB, POPULAR_PLUGINS, POPULAR_THEMES = _load_cve_db()
+EFFECTIVE_CVE_DB, EFFECTIVE_THEME_CVE_DB, INSTALLS_INDEX, POPULAR_THEMES = _load_cve_db()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSTALLS SCORING  (graduated, mirrors WP.org active_installs bands)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _installs_score(slug):
+    """Return a popularity score (0–10) based on WordPress.org active_installs."""
+    n = INSTALLS_INDEX.get(slug, 0)
+    if   n >= 1_000_000: return 10
+    elif n >= 500_000:   return 9
+    elif n >= 100_000:   return 7
+    elif n >= 50_000:    return 6
+    elif n >= 10_000:    return 5
+    elif n >= 1_000:     return 3
+    elif n >= 100:       return 1
+    else:                return 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PRIORITY PROBE LIST BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_priority_probe_list(exclude_set, limit=None):
+def _build_priority_probe_list(exclude_set, limit=None, min_installs=0):
     """Score and sort all CVE-DB plugin slugs for smart probing.
 
     Score per slug (cumulative across all its CVEs):
-      +4  slug in WP.org popular list    (widely installed → high hit probability)
-      +3  per CVE from a recent year     (2024/2025/2026 → actively researched/exploited)
-      +2  per CRITICAL CVE               (CVSS 9.0–10.0)
-      +1  per HIGH CVE                   (CVSS 7.0–8.9)
+      0–10  installs_score()  – graduated WordPress.org active_installs bands
+      +3    per CVE from a recent year (RECENT_CVE_YEARS)
+      +2    per CRITICAL CVE
+      +1    per HIGH CVE
+
+    Filtering:
+      If min_installs > 0 a slug is excluded UNLESS it has a recent CRITICAL CVE
+      (those are always included regardless of install count — security priority).
 
     Returns slugs sorted by score descending, capped at `limit` (None = all).
     """
-    popular_set = set(POPULAR_PLUGINS)
     scored = []
 
     for slug, entries in EFFECTIVE_CVE_DB.items():
         if slug in exclude_set:
             continue
 
-        score = 4 if slug in popular_set else 0
+        score           = _installs_score(slug)
+        has_recent_crit = False
 
         for entry in entries:
             cve_id   = entry[1] if len(entry) > 1 else ''
             severity = (entry[2] if len(entry) > 2 else '').upper()
 
             m = re.search(r'CVE-(\d{4})-', cve_id or '')
-            if m and int(m.group(1)) in RECENT_CVE_YEARS:
+            is_recent = m and int(m.group(1)) in RECENT_CVE_YEARS
+            if is_recent:
                 score += 3
+                if severity == 'CRITICAL':
+                    has_recent_crit = True
 
             if severity == 'CRITICAL':
                 score += 2
             elif severity == 'HIGH':
                 score += 1
+
+        # Apply MIN_ACTIVE_INSTALLS filter:
+        # skip low-installs slugs unless they carry a recent CRITICAL CVE
+        if min_installs > 0:
+            known_installs = INSTALLS_INDEX.get(slug, 0)
+            if known_installs < min_installs and not has_recent_crit:
+                continue
 
         scored.append((score, slug))
 
@@ -464,15 +503,22 @@ class EndpointDiscovery:
         print(f"found {len(html_plugins)} plugin(s), {len(html_themes)} theme(s)", flush=True)
 
         # ── STEP 2: Probe CVE-DB slugs — priority-scored ──────────────────────
-        # Slugs are scored by: WP.org popularity × recent CVE year × severity.
-        # Normal mode: top NORMAL_MODE_PROBE_LIMIT scored slugs.
-        # Aggressive mode: full CVE-DB, still ordered by priority score.
+        # Slugs are scored by:
+        #   graduated active_installs (0–10) + recent CVE year (+3) + severity (+1/+2)
+        # MIN_ACTIVE_INSTALLS filter: skip low-installs slugs in normal mode
+        #   UNLESS they carry a recent CRITICAL CVE (always probed).
+        # Normal mode:    top NORMAL_MODE_PROBE_LIMIT  + min_installs filter
+        # Aggressive mode: all slugs, min_installs ignored (full coverage)
         exclude = set(html_plugins)
         if self.aggressive:
-            probe_slugs = _build_priority_probe_list(exclude_set=exclude)
+            probe_slugs = _build_priority_probe_list(
+                exclude_set=exclude, min_installs=0
+            )
         else:
             probe_slugs = _build_priority_probe_list(
-                exclude_set=exclude, limit=NORMAL_MODE_PROBE_LIMIT
+                exclude_set=exclude,
+                limit=NORMAL_MODE_PROBE_LIMIT,
+                min_installs=MIN_ACTIVE_INSTALLS,
             )
 
         # Start with HTML-discovered plugins/themes as confirmed
@@ -532,10 +578,13 @@ class EndpointDiscovery:
         if total > 0:
             db_total = len(EFFECTIVE_CVE_DB)
             if self.aggressive:
-                mode_label = f"aggressive, all {total:,}/{db_total:,}"
+                mode_label = f"aggressive — all {total:,}/{db_total:,} slugs"
             else:
-                popular_in = sum(1 for s in probe_slugs if s in set(POPULAR_PLUGINS))
-                mode_label = f"priority-scored {total:,}/{db_total:,}, {popular_in} popular"
+                in_index   = sum(1 for s in probe_slugs if s in INSTALLS_INDEX)
+                filter_str = (f", min_installs≥{MIN_ACTIVE_INSTALLS:,}"
+                              if MIN_ACTIVE_INSTALLS > 0 else "")
+                mode_label = (f"normal — {total:,}/{db_total:,} priority-scored"
+                              f" ({in_index:,} with installs data{filter_str})")
             self.vprint(f"    Probe mode: {mode_label}", level=1)
             print(f"    Probing [{done:{len(str(total))}}/{total}]", end='', flush=True)
             with ThreadPoolExecutor(max_workers=workers) as ex:

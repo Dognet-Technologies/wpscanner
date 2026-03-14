@@ -51,8 +51,8 @@ MIN_CVSS = 0.0
 # WordPress.org public API (no auth required)
 WP_ORG_PLUGIN_API            = "https://api.wordpress.org/plugins/info/1.2/"
 WP_ORG_THEME_API             = "https://api.wordpress.org/themes/info/1.2/"
-WP_ORG_POPULAR_PLUGINS_LIMIT = 3000   # top N plugins to cache for smart probing
-WP_ORG_POPULAR_THEMES_LIMIT  = 500    # top N themes
+WP_ORG_POPULAR_PLUGINS_LIMIT = 10000   # plugins indexed for installs data + scoring
+WP_ORG_POPULAR_THEMES_LIMIT  = 500     # themes cached for smart theme probing
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSION COMPARISON (mirrors EndpointDiscovery._parse_ver logic)
@@ -88,22 +88,25 @@ def _max_version(versions):
 # WORDPRESS.ORG POPULAR LIST  (no auth – public API)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_popular_wp_org(kind='plugin', limit=3000, timeout=30):
+def fetch_popular_wp_org(kind='plugin', limit=10000, timeout=30):
     """Fetch top N popular plugins or themes from WordPress.org (no auth required).
 
     kind  : 'plugin' or 'theme'
-    limit : maximum number of slugs to return
-    Returns a list of slugs ordered by active_installs descending.
-    On any network error the function returns an empty list rather than raising.
+    limit : maximum number of entries to return
+    Returns a dict  { slug: active_installs }  ordered by active_installs desc.
+    On any network error returns an empty dict rather than raising.
+
+    The dict preserves insertion order (Python 3.7+), so iteration is always
+    highest → lowest installs.
     """
     api_url  = WP_ORG_PLUGIN_API if kind == 'plugin' else WP_ORG_THEME_API
     action   = 'query_plugins'   if kind == 'plugin' else 'query_themes'
     item_key = 'plugins'         if kind == 'plugin' else 'themes'
-    per_page = 100               # WP.org max per page
-    slugs    = []
+    per_page = 100
+    result   = {}   # {slug: active_installs}
     page     = 1
 
-    while len(slugs) < limit:
+    while len(result) < limit:
         params = {
             'action':                            action,
             'request[per_page]':                 per_page,
@@ -128,20 +131,24 @@ def fetch_popular_wp_org(kind='plugin', limit=3000, timeout=30):
         if not items:
             break
 
-        seen = set(slugs)
         for item in items:
             slug = item.get('slug', '').strip()
-            if slug and slug not in seen:
-                slugs.append(slug)
-                seen.add(slug)
+            if slug and slug not in result:
+                try:
+                    installs = int(item.get('active_installs') or 0)
+                except (ValueError, TypeError):
+                    installs = 0
+                result[slug] = installs
+                if len(result) >= limit:
+                    break
 
         info        = data.get('info', {})
         total_pages = int(info.get('pages', 1))
-        if page >= total_pages or len(slugs) >= limit:
+        if page >= total_pages or len(result) >= limit:
             break
         page += 1
 
-    return slugs[:limit]
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,16 +355,17 @@ def run_db_update(path=DB_PATH, verbose=True):
     except Exception as e:
         return False, f"Fetch failed: {e}"
 
-    # Fetch WordPress.org popular lists (best-effort; failures are non-fatal)
-    popular_plugins = []
-    popular_themes  = []
+    # Fetch WordPress.org installs index (best-effort; failures are non-fatal)
+    installs_index = {}
+    popular_themes = []
     try:
         if verbose:
-            print(f"  Fetching popular plugins from WordPress.org...", end=' ', flush=True)
-        popular_plugins = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
-        popular_themes  = fetch_popular_wp_org('theme',  WP_ORG_POPULAR_THEMES_LIMIT)
+            print(f"  Fetching installs index from WordPress.org...", end=' ', flush=True)
+        installs_index = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+        themes_dict    = fetch_popular_wp_org('theme',  WP_ORG_POPULAR_THEMES_LIMIT)
+        popular_themes = list(themes_dict.keys())
         if verbose:
-            print(f"done ({len(popular_plugins):,} plugins, {len(popular_themes):,} themes)", flush=True)
+            print(f"done ({len(installs_index):,} plugins, {len(popular_themes):,} themes)", flush=True)
     except Exception as e:
         if verbose:
             print(f"skipped ({e})", flush=True)
@@ -365,7 +373,7 @@ def run_db_update(path=DB_PATH, verbose=True):
     try:
         db_plugins, db_themes, _ = parse_feed(data)
         meta = save_db(db_plugins, db_themes=db_themes, path=path,
-                       popular_plugins=popular_plugins, popular_themes=popular_themes)
+                       installs_index=installs_index, popular_themes=popular_themes)
     except Exception as e:
         return False, f"Parse/save failed: {e}"
 
@@ -373,7 +381,7 @@ def run_db_update(path=DB_PATH, verbose=True):
     plugins = meta['plugins']
     themes  = meta.get('themes', 0)
     return True, (f"{plugins:,} plugins + {themes:,} themes, {total:,} CVE entries; "
-                  f"{len(popular_plugins):,} popular plugins cached")
+                  f"{len(installs_index):,} plugins in installs index")
 
 
 def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True):
@@ -417,17 +425,24 @@ def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbo
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_db(db_plugins, db_themes=None, path=DB_PATH, source_url=FEED_URL,
-            popular_plugins=None, popular_themes=None):
-    """Serialize plugin/theme CVE databases and popular lists to JSON.
+            installs_index=None, popular_themes=None):
+    """Serialize plugin/theme CVE databases and popularity data to JSON.
 
     Layout of cve_db.json:
       {
-        "_meta":   { source, updated, plugins, entries, themes, theme_entries,
-                     popular_plugins, popular_themes, popular_updated },
+        "_meta": {
+            source, updated, plugins, entries, themes, theme_entries,
+            installs_index,    # {slug: active_installs} for top-N plugins
+            popular_themes,    # [slug, ...] ordered by active_installs
+            popular_updated
+        },
         "_themes": { slug: [[max_vuln, cve_id, severity, cvss, desc], ...] },
         "<plugin-slug>": [ ... ],
         ...
       }
+
+    installs_index : dict {slug: active_installs} from WordPress.org
+    popular_themes : list of theme slugs ordered by active_installs
     """
     db_themes = db_themes or {}
     total_plugin_entries = sum(len(v) for v in db_plugins.values())
@@ -442,10 +457,10 @@ def save_db(db_plugins, db_themes=None, path=DB_PATH, source_url=FEED_URL,
         'themes':        len(db_themes),
         'theme_entries': total_theme_entries,
     }
-    if popular_plugins is not None:
-        meta['popular_plugins']  = popular_plugins
-        meta['popular_themes']   = popular_themes or []
-        meta['popular_updated']  = now
+    if installs_index is not None:
+        meta['installs_index']  = installs_index    # {slug: N}
+        meta['popular_themes']  = popular_themes or []
+        meta['popular_updated'] = now
 
     payload = {'_meta': meta}
     if db_themes:
@@ -515,24 +530,26 @@ def main():
         print("\nDry-run mode: skipping save and popular fetch.")
         return
 
-    # Fetch WordPress.org popular lists (best-effort)
+    # Fetch WordPress.org installs index (best-effort)
     print()
-    print(f"  Fetching popular plugins from WordPress.org...", end=' ', flush=True)
-    popular_plugins = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
-    print(f"done ({len(popular_plugins):,})")
+    print(f"  Fetching installs index from WordPress.org...", end=' ', flush=True)
+    installs_index = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+    print(f"done ({len(installs_index):,} plugins)")
     print(f"  Fetching popular themes  from WordPress.org...", end=' ', flush=True)
-    popular_themes = fetch_popular_wp_org('theme', WP_ORG_POPULAR_THEMES_LIMIT)
-    print(f"done ({len(popular_themes):,})")
+    themes_dict    = fetch_popular_wp_org('theme', WP_ORG_POPULAR_THEMES_LIMIT)
+    popular_themes = list(themes_dict.keys())
+    print(f"done ({len(popular_themes):,} themes)")
     print()
 
     # Save
     meta = save_db(db_plugins, db_themes=db_themes, path=args.output,
-                   popular_plugins=popular_plugins, popular_themes=popular_themes)
+                   installs_index=installs_index, popular_themes=popular_themes)
     print(f"Saved to: {args.output}")
     print(f"Updated : {meta['updated']}")
     print(f"Plugins : {meta['plugins']:,} slugs, {meta['entries']:,} CVE entries")
     print(f"Themes  : {meta['themes']:,} slugs, {meta['theme_entries']:,} CVE entries")
-    print(f"Popular : {len(popular_plugins):,} plugins, {len(popular_themes):,} themes cached")
+    print(f"Index   : {len(installs_index):,} plugins with installs data, "
+          f"{len(popular_themes):,} themes cached")
     print()
     print("Run WENDY normally - it will automatically load the updated database.")
 

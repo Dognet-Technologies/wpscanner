@@ -30,6 +30,13 @@ import datetime
 import argparse
 import requests
 
+# Load API keys from wendy/.keys before anything else reads os.environ
+try:
+    from wendy.config import load_keys
+except ImportError:
+    from config import load_keys
+load_keys()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,17 +81,18 @@ def _max_version(versions):
 # FEED FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_feed(timeout=90, api_key=None):
+def fetch_feed(timeout=90):
     """Fetch the full Wordfence Intelligence v3 vulnerability feed.
 
-    Requires a valid API key. Pass via the api_key argument or set the
-    WORDFENCE_API_KEY environment variable.
+    Requires WORDFENCE_API_KEY to be set in os.environ (loaded from wendy/.keys
+    or the environment before calling this function).
     """
-    key = api_key or os.environ.get('WORDFENCE_API_KEY', '').strip()
+    key = os.environ.get('WORDFENCE_API_KEY', '').strip()
     if not key:
         raise RuntimeError(
             "Wordfence API key required for v3 feed.\n"
-            "  Set the WORDFENCE_API_KEY environment variable or pass --api-key.\n"
+            "  Add WORDFENCE_API_KEY=<your_key> to wendy/.keys\n"
+            "  (copy wendy/.keys.example as a template).\n"
             "  Obtain a free key at: https://www.wordfence.com (Account → Integrations)"
         )
 
@@ -261,7 +269,7 @@ def needs_update(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS):
     return age >= max_age_days
 
 
-def run_db_update(path=DB_PATH, verbose=True, api_key=None):
+def run_db_update(path=DB_PATH, verbose=True):
     """
     Fetch the Wordfence feed and save it to path.
     Returns (ok: bool, message: str).
@@ -271,7 +279,7 @@ def run_db_update(path=DB_PATH, verbose=True, api_key=None):
     import re
 
     try:
-        data = fetch_feed(timeout=90, api_key=api_key)
+        data = fetch_feed(timeout=90)
     except Exception as e:
         return False, f"Fetch failed: {e}"
 
@@ -286,7 +294,7 @@ def run_db_update(path=DB_PATH, verbose=True, api_key=None):
     return True, f"{plugins:,} plugins, {total:,} CVE entries saved to {path}"
 
 
-def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True, api_key=None):
+def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True):
     """
     Check if the CVE DB needs updating and do so automatically.
 
@@ -311,7 +319,7 @@ def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbo
     if verbose:
         print(f"  [CVE DB] Auto-updating ({reason})...", end=' ', flush=True)
 
-    ok, msg = run_db_update(path=path, verbose=False, api_key=api_key)
+    ok, msg = run_db_update(path=path, verbose=False)
 
     if verbose:
         if ok:
@@ -369,21 +377,19 @@ def main():
                         help='Fetch and parse but do not write cve_db.json')
     parser.add_argument('--output', default=DB_PATH, metavar='PATH',
                         help=f'Output path (default: {DB_PATH})')
-    parser.add_argument('--api-key', default=None, metavar='KEY',
-                        help='Wordfence Intelligence API key (overrides WORDFENCE_API_KEY env var)')
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get('WORDFENCE_API_KEY', '').strip()
+    key_present = bool(os.environ.get('WORDFENCE_API_KEY', '').strip())
 
     print("WENDY CVE Database Updater")
     print(f"Source : {FEED_URL}")
     print(f"Output : {args.output}")
-    print(f"Auth   : {'key provided' if api_key else 'NO KEY — set WORDFENCE_API_KEY'}")
+    print(f"Auth   : {'key loaded' if key_present else 'NO KEY — add WORDFENCE_API_KEY to wendy/.keys'}")
     print()
 
     # Fetch
     try:
-        data = fetch_feed(api_key=api_key)
+        data = fetch_feed()
     except requests.exceptions.Timeout:
         print("ERROR: Request timed out. Retry or check connectivity.", file=sys.stderr)
         sys.exit(1)

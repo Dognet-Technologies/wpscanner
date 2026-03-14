@@ -1,0 +1,11 @@
+# WENDY API Keys
+# Copy this file to wendy/.keys and fill in your keys.
+# wendy/.keys is gitignored and will never be committed.
+#
+# Wordfence Intelligence API key — required for CVE database updates (-u flag)
+# Obtain for free at: https://www.wordfence.com (Account → Integrations)
+WORDFENCE_API_KEY=
+
+# WPScan API token — required for extended CVE lookup in aggressive mode (--aggressive)
+# Free plan: 25 requests/day — https://wpscan.com/register
+WPSCAN_API_TOKEN=

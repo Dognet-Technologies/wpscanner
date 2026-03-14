@@ -23,6 +23,13 @@ from requests.adapters import HTTPAdapter
 import warnings
 warnings.filterwarnings('ignore')
 
+# Load API keys from wendy/.keys before anything else reads os.environ
+try:
+    from wendy.config import load_keys
+except ImportError:
+    from config import load_keys
+load_keys()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI COLOR HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1843,10 +1850,6 @@ def main():
     parser.add_argument('-u', '--update', action='store_true',
                         help='Update WENDY (git pull) and the CVE database, then exit '
                              '(or continue scanning if URL is also given)')
-    parser.add_argument('--api-key', default=None, metavar='KEY',
-                        help='Wordfence Intelligence API key for CVE DB update '
-                             '(overrides WORDFENCE_API_KEY env var)')
-
     args = parser.parse_args()
 
     if not args.url and not args.update:
@@ -1905,7 +1908,7 @@ def main():
             print(f"{C.YELLOW}warning: {out}{C.RESET}")
 
         print(f"\n  Updating CVE database from Wordfence Intelligence...")
-        ok_db, msg_db = run_db_update(path=DB_PATH, verbose=False, api_key=args.api_key)
+        ok_db, msg_db = run_db_update(path=DB_PATH, verbose=False)
         if ok_db:
             print(f"  {C.GREEN}✓{C.RESET}  {msg_db}")
         else:
@@ -1918,7 +1921,7 @@ def main():
     # ── Auto-update CVE DB silently if needed (weekly) ────────────────────────
     if not args.update:
         # Only auto-update when doing a normal scan (not already done above)
-        auto_update_if_needed(path=DB_PATH, verbose=False, api_key=args.api_key)
+        auto_update_if_needed(path=DB_PATH, verbose=False)
 
     if not args.url:
         sys.exit(0)

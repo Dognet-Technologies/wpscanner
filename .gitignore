@@ -5,3 +5,4 @@ endpoint_discovery/
 *.tzt
 *.png
 __pycache__/
+wendy/.keys

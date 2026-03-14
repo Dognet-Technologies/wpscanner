@@ -391,28 +391,10 @@ class EndpointDiscovery:
             html_plugins[slug] = self._get_plugin_version(base_url, slug)
         print(f"found {len(html_plugins)} plugin(s), {len(html_themes)} theme(s)", flush=True)
 
-        # ── STEP 2: Probe hardcoded list (backend-only plugins) ───────────────
-        probe_slugs = [
-            'royal-elementor-addons','elementor','elementor-pro','woocommerce','woocommerce-payments',
-            'jetpack','contact-form-7','wp-file-manager','yoast-seo','all-in-one-seo-pack',
-            'wordfence','ithemes-security','really-simple-ssl','sucuri-scanner',
-            'wp-fastest-cache','litespeed-cache','w3-total-cache','wp-super-cache','wp-rocket',
-            'autoptimize','advanced-custom-fields','acf-pro','gravityforms','ninja-forms',
-            'wpforms','wpforms-lite','revslider','js_composer','tablepress','the-events-calendar',
-            'duplicator','updraftplus','all-in-one-wp-migration','backupbuddy',
-            'wp-statistics','google-analytics-for-wordpress','monsterinsights',
-            'complianz-gdpr','complianz','broken-link-checker',
-            'loginizer','wps-hide-login','limit-login-attempts-reloaded',
-            'ewww-image-optimizer','smush','redirection','wordpress-seo',
-            'wp-mail-smtp','mailchimp-for-wp','query-monitor','wp-crontrol',
-            'mainwp','managewp-worker','wp-migrate-db','wp01',
-            'rank-math-seo','rankmath','seo-by-rank-math',
-            'google-site-kit','wpscan','instant-indexing',
-            'wplingua','digital-license-manager','greenshift-animation-and-page-builder-blocks',
-            'site-add-on-watchdog',
-        ]
-        # Skip slugs already discovered from HTML
-        probe_slugs = [s for s in probe_slugs if s not in html_plugins]
+        # ── STEP 2: Probe CVE-DB slugs (automatically in sync with the DB) ──────
+        # Primary list = every slug tracked in the effective CVE database so the
+        # probe set stays up-to-date without manual maintenance.
+        probe_slugs = [s for s in EFFECTIVE_CVE_DB.keys() if s not in html_plugins]
         # Remove duplicates preserving order
         seen = set()
         probe_slugs = [s for s in probe_slugs if not (s in seen or seen.add(s))]
@@ -426,7 +408,7 @@ class EndpointDiscovery:
                     'paid-memberships-pro','woocommerce-subscriptions',
                     'stripe-payments','woo-stripe-payment','paypal-for-woocommerce',
                     'wp-simple-firewall','anti-malware',
-                ] if s not in html_plugins
+                ] if s not in html_plugins and s not in seen
             ]
 
         # Start with HTML-discovered plugins/themes as confirmed

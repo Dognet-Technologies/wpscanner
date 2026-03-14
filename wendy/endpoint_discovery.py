@@ -1675,7 +1675,10 @@ def _do_self_update():
 
 def main():
     import argparse
-    from wendy.update_db import auto_update_if_needed, run_db_update, DB_PATH
+    try:
+        from wendy.update_db import auto_update_if_needed, run_db_update, DB_PATH
+    except ImportError:
+        from update_db import auto_update_if_needed, run_db_update, DB_PATH
 
     parser = argparse.ArgumentParser(
         prog='wendy',

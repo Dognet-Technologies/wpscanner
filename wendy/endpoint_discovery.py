@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-WENDY - WordPress ENDpoint discoverY v0.2.0
+WENDY - WordPress ENDpoint discoverY v0.3.0
 Dognet Technologies srl | info@dognet.tech
 For authorized security testing only.
 
 Usage: python endpoint_discovery.py <URL> [-v|-vv] [--aggressive]
 """
 
+import json
 import requests
 import urllib.parse
 import time
@@ -43,9 +44,10 @@ def sev_color(severity):
     return m.get(severity.upper(), '') + severity + C.RESET
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EMBEDDED CVE DATABASE
+# EMBEDDED CVE DATABASE  (fallback when cve_db.json is absent)
 # Format: { plugin_slug: [(max_vuln_version, cve_id, severity, cvss, desc)] }
 # Only well-documented, publicly verified CVEs are included.
+# Keep this as a minimal baseline; the live DB is populated by update_db.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
 CVE_DATABASE = {
@@ -138,6 +140,52 @@ CVE_DATABASE = {
     ],
 }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE CVE DATABASE LOADER
+# Loads wendy/cve_db.json (produced by update_db.py) and merges it with the
+# embedded CVE_DATABASE above.  The JSON file is gitignored and generated
+# locally; if absent the embedded DB is used as-is (works offline / first run).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_cve_db():
+    """
+    Return the effective CVE database, merging embedded + cve_db.json.
+
+    Priority: embedded entries are kept as-is; additional entries from the
+    JSON file are appended unless the same CVE ID is already present.
+    """
+    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cve_db.json')
+    if not os.path.exists(json_path):
+        return CVE_DATABASE
+
+    try:
+        with open(json_path, encoding='utf-8') as fh:
+            raw = json.load(fh)
+    except Exception:
+        return CVE_DATABASE   # corrupted file → fall back
+
+    raw.pop('_meta', None)   # strip metadata block
+
+    db = {slug: list(entries) for slug, entries in CVE_DATABASE.items()}
+
+    for slug, json_entries in raw.items():
+        existing = db.get(slug, [])
+        # Collect CVE IDs already present for this plugin
+        known_cves = {e[1] for e in existing if e[1]}
+        for entry in json_entries:
+            if not isinstance(entry, list) or len(entry) < 5:
+                continue
+            cve_id = entry[1]
+            if cve_id and cve_id in known_cves:
+                continue   # already in embedded DB
+            known_cves.add(cve_id)
+            db.setdefault(slug, []).append(tuple(entry))
+
+    return db
+
+
+EFFECTIVE_CVE_DB = _load_cve_db()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN CLASS
@@ -384,9 +432,9 @@ class EndpointDiscovery:
         """
         findings = []
         for slug, version in plugins_found.items():
-            if slug not in CVE_DATABASE:
+            if slug not in EFFECTIVE_CVE_DB:
                 continue
-            for (max_vuln, cve_id, severity, cvss, desc) in CVE_DATABASE[slug]:
+            for (max_vuln, cve_id, severity, cvss, desc) in EFFECTIVE_CVE_DB[slug]:
                 if version is None:
                     # Version unknown - report as possible
                     findings.append({
@@ -1324,7 +1372,7 @@ class EndpointDiscovery:
                 print(f"     {f['cve']}  CVSS {f['cvss']}  {f['desc']}")
         else:
             print(f"  {C.GREEN}✓{C.RESET} No known CVEs matched for detected plugins")
-            self.vprint(f"  {C.DIM}(CVE database covers {len(CVE_DATABASE)} plugin families){C.RESET}", level=1)
+            self.vprint(f"  {C.DIM}(CVE database covers {len(EFFECTIVE_CVE_DB)} plugin families){C.RESET}", level=1)
 
         # ── PHASE 3: SECURITY HEADERS ────────────────────────────────────────
         self._section(3, TOTAL_PHASES, "Security Headers")

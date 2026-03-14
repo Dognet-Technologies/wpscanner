@@ -307,16 +307,19 @@ class EndpointDiscovery:
         """
         sources = [
             # (path, regex_pattern)
-            ('/readme.html',          r'[Vv]ersion\s+(\d+\.\d+[\.\d]*)'),
             ('/',                     r'<meta[^>]+generator[^>]+WordPress\s+([\d.]+)'),
             ('/feed/',                r'<generator>[^<]*wordpress[^<]*/v=([\d.]+)</generator>'),
-            ('/wp-login.php',         r'ver=([\d.]+)'),
+            # wp-login.php loads core assets with ver=X.X.X — match wp-includes URLs only
+            ('/wp-login.php',         r'wp-includes/[^"]+[?&]ver=([\d.]+)'),
+            ('/readme.html',          r'[Vv]ersion\s+(\d+\.\d+[\.\d]*)'),
             ('/wp-includes/version.php', r"\$wp_version\s*=\s*'([\d.]+)'"),
+            # REST API index exposes "version" on some WP builds
+            ('/wp-json/',             r'"version"\s*:\s*"([\d.]+)"'),
         ]
         if self.aggressive:
             sources += [
                 ('/sitemap.xml',      r'WordPress\s+([\d.]+)'),
-                ('/wp-json/',         r'"version":"([\d.]+)"'),
+                ('/wp-sitemap.xml',   r'WordPress\s+([\d.]+)'),
             ]
 
         for path, pattern in sources:
@@ -386,40 +389,65 @@ class EndpointDiscovery:
 
         found = {}
         workers = 10 if self.aggressive else 5
+        import uuid, sys
 
-        # Establish baseline: probe a random non-existent plugin directory to
-        # detect servers that return 403 for ALL paths (global deny rules).
-        import uuid
+        # Establish baseline: probe a random non-existent plugin to detect
+        # servers that return 403 globally (global deny rules).
         _canary = f"_canary-{uuid.uuid4().hex[:12]}"
         _canary_url = f"{base_url.rstrip('/')}/wp-content/plugins/{_canary}/readme.txt"
-        _canary_r = self._safe_get(_canary_url, timeout=8)
+        _canary_r = self._safe_get(_canary_url, timeout=5)
         _baseline_status = _canary_r.status_code if _canary_r else 404
 
+        def _extract_version_from_readme(text):
+            m = re.search(r'[Ss]table\s+tag:\s*([\d.]+)', text)
+            if m:
+                return m.group(1)
+            m = re.search(r'[Vv]ersion:\s*([\d.]+)', text)
+            if m:
+                return m.group(1)
+            return None
+
         def check_plugin(slug):
-            # Use readme.txt as probe: it is present in virtually every plugin
-            # and will 200 only if the plugin is actually installed.
+            # Use readme.txt as probe: present in every plugin, 200 only if installed.
+            # Reuse the response to extract version (avoid double fetch).
             readme_url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/readme.txt"
-            r = self._safe_get(readme_url, timeout=8)
+            r = self._safe_get(readme_url, timeout=6)
             if r and r.status_code == 200:
-                ver = self._get_plugin_version(base_url, slug)
+                content_type = r.headers.get('Content-Type', '')
+                if 'text/html' not in content_type:
+                    ver = _extract_version_from_readme(r.text)
+                else:
+                    ver = self._get_plugin_version(base_url, slug)
                 return slug, ver
-            # Fallback: directory with 200 (listing enabled) also counts
+            # Fallback: directory listing enabled (200)
             if r and r.status_code != _baseline_status:
                 dir_url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/"
-                r2 = self._safe_get(dir_url, timeout=8)
+                r2 = self._safe_get(dir_url, timeout=6)
                 if r2 and r2.status_code == 200:
                     ver = self._get_plugin_version(base_url, slug)
                     return slug, ver
             return None, None
 
+        total = len(plugin_slugs)
+        done = 0
+        sys.stdout.write(f"    Checking {total} plugins: 0/{total}")
+        sys.stdout.flush()
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(check_plugin, s): s for s in plugin_slugs}
             for fut in as_completed(futures):
+                done += 1
                 slug, ver = fut.result()
                 if slug:
                     found[slug] = ver
-                    self.vprint(f"    + {slug}  {C.DIM}{'v'+ver if ver else '(version unknown)'}{C.RESET}", level=1)
-                time.sleep(random.uniform(0.1, 0.3))
+                    sys.stdout.write(f"\r    Checking {total} plugins: {done}/{total}  "
+                                     f"[found: {slug}{'  v'+ver if ver else ''}]  \n")
+                    sys.stdout.flush()
+                    sys.stdout.write(f"    Checking {total} plugins: {done}/{total}")
+                else:
+                    sys.stdout.write(f"\r    Checking {total} plugins: {done}/{total}  ")
+                sys.stdout.flush()
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
 
         # Basic theme detection — use style.css which every theme must have
         theme_slugs_base = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
@@ -431,17 +459,23 @@ class EndpointDiscovery:
 
         # Baseline for themes
         _canary_theme_url = f"{base_url.rstrip('/')}/wp-content/themes/{_canary}/style.css"
-        _canary_theme_r = self._safe_get(_canary_theme_url, timeout=6)
+        _canary_theme_r = self._safe_get(_canary_theme_url, timeout=5)
         _baseline_theme_status = _canary_theme_r.status_code if _canary_theme_r else 404
 
         themes_found = {}
-        for slug in theme_slugs_base:
+        theme_total = len(theme_slugs_base)
+        for i, slug in enumerate(theme_slugs_base, 1):
+            sys.stdout.write(f"\r    Checking {theme_total} themes: {i}/{theme_total}  ")
+            sys.stdout.flush()
             style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
-            r = self._safe_get(style_url, timeout=6)
+            r = self._safe_get(style_url, timeout=5)
             if r and r.status_code == 200:
                 themes_found[slug] = None
-                self.vprint(f"    + theme:{slug}", level=1)
-            time.sleep(random.uniform(0.1, 0.3))
+                sys.stdout.write(f"\r    Checking {theme_total} themes: {i}/{theme_total}  "
+                                 f"[found: {slug}]  \n")
+                sys.stdout.flush()
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
 
         return found, themes_found
 

@@ -1850,6 +1850,24 @@ def main():
         parser.print_help()
         sys.exit(0)
 
+    # ── Validate target URL (before banner / network calls) ───────────────────
+    if args.url:
+        raw_url = args.url.strip()
+        _parsed = urllib.parse.urlparse(raw_url if '://' in raw_url else 'https://' + raw_url)
+        _host   = _parsed.hostname or ''   # lowercase, strips port
+        # Must be http/https, have a hostname, and look like "label.tld"
+        # (at least one char before the dot, at least two after)
+        _valid  = (
+            _parsed.scheme in ('http', 'https')
+            and bool(_host)
+            and bool(re.match(r'^[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?\.[a-z]{2,}$', _host))
+        )
+        if not _valid:
+            print(f"\n  ✗  Invalid target: {raw_url!r}")
+            print(f"     URL must start with http:// or https:// and include a valid domain.")
+            print(f"     Example: https://example.com\n")
+            sys.exit(1)
+
     verbosity = min(args.verbose, 2)
 
     # ── Banner ────────────────────────────────────────────────────────────────

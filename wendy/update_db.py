@@ -80,6 +80,12 @@ def fetch_feed(timeout=90):
             'Accept':      'application/json',
         }
     )
+    if r.status_code == 410:
+        raise RuntimeError(
+            f"Feed returned HTTP 410 Gone — the Wordfence Intelligence endpoint\n"
+            f"  has moved or been retired. Update FEED_URL in wendy/update_db.py.\n"
+            f"  Current URL: {FEED_URL}"
+        )
     r.raise_for_status()
     return r.json()
 

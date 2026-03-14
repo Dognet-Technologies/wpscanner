@@ -387,12 +387,29 @@ class EndpointDiscovery:
         found = {}
         workers = 10 if self.aggressive else 5
 
+        # Establish baseline: probe a random non-existent plugin directory to
+        # detect servers that return 403 for ALL paths (global deny rules).
+        import uuid
+        _canary = f"_canary-{uuid.uuid4().hex[:12]}"
+        _canary_url = f"{base_url.rstrip('/')}/wp-content/plugins/{_canary}/readme.txt"
+        _canary_r = self._safe_get(_canary_url, timeout=8)
+        _baseline_status = _canary_r.status_code if _canary_r else 404
+
         def check_plugin(slug):
-            url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/"
-            r = self._safe_get(url, timeout=8)
-            if r and r.status_code in (200, 403):
+            # Use readme.txt as probe: it is present in virtually every plugin
+            # and will 200 only if the plugin is actually installed.
+            readme_url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/readme.txt"
+            r = self._safe_get(readme_url, timeout=8)
+            if r and r.status_code == 200:
                 ver = self._get_plugin_version(base_url, slug)
                 return slug, ver
+            # Fallback: directory with 200 (listing enabled) also counts
+            if r and r.status_code != _baseline_status:
+                dir_url = f"{base_url.rstrip('/')}/wp-content/plugins/{slug}/"
+                r2 = self._safe_get(dir_url, timeout=8)
+                if r2 and r2.status_code == 200:
+                    ver = self._get_plugin_version(base_url, slug)
+                    return slug, ver
             return None, None
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -404,7 +421,7 @@ class EndpointDiscovery:
                     self.vprint(f"    + {slug}  {C.DIM}{'v'+ver if ver else '(version unknown)'}{C.RESET}", level=1)
                 time.sleep(random.uniform(0.1, 0.3))
 
-        # Basic theme detection
+        # Basic theme detection — use style.css which every theme must have
         theme_slugs_base = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
                             'divi','avada','astra','hello-elementor','neve','generatepress',
                             'flatsome','storefront','oceanwp','enfold','bridge','salient']
@@ -412,11 +429,16 @@ class EndpointDiscovery:
             theme_slugs_base += ['betheme','jupiter','woodmart','porto','electro',
                                   'thrive-themes','kadence','blocksy']
 
+        # Baseline for themes
+        _canary_theme_url = f"{base_url.rstrip('/')}/wp-content/themes/{_canary}/style.css"
+        _canary_theme_r = self._safe_get(_canary_theme_url, timeout=6)
+        _baseline_theme_status = _canary_theme_r.status_code if _canary_theme_r else 404
+
         themes_found = {}
         for slug in theme_slugs_base:
-            url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/"
-            r = self._safe_get(url, timeout=6)
-            if r and r.status_code in (200, 403):
+            style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
+            r = self._safe_get(style_url, timeout=6)
+            if r and r.status_code == 200:
                 themes_found[slug] = None
                 self.vprint(f"    + theme:{slug}", level=1)
             time.sleep(random.uniform(0.1, 0.3))
@@ -684,11 +706,18 @@ class EndpointDiscovery:
             # (path, expected_bad_status, check_fn, severity, title, desc)
             ('/readme.html',            lambda r: r.status_code == 200,
              'MEDIUM', 'readme.html exposed', 'WordPress version disclosed via readme.html'),
-            ('/wp-cron.php',            lambda r: r.status_code == 200,
+            # wp-cron: 200 with empty body is normal WP behaviour (cron fired with no output)
+            ('/wp-cron.php',            lambda r: r.status_code == 200 and len(r.text.strip()) > 0,
              'MEDIUM', 'wp-cron.php public', 'wp-cron.php accessible anonymously - DoS/amplification risk'),
-            ('/wp-admin/install.php',   lambda r: r.status_code == 200,
+            # install.php: only a real risk when WP is NOT already installed
+            ('/wp-admin/install.php',
+             lambda r: r.status_code == 200 and 'already installed' not in r.text.lower(),
              'HIGH',   'install.php accessible', 'WordPress install script accessible - may allow site reset'),
-            ('/wp-admin/upgrade.php',   lambda r: r.status_code == 200,
+            # upgrade.php: only a risk when an actual upgrade is needed
+            ('/wp-admin/upgrade.php',
+             lambda r: r.status_code == 200 and 'no update' not in r.text.lower()
+                       and 'già aggiornato' not in r.text.lower()
+                       and 'already up to date' not in r.text.lower(),
              'MEDIUM', 'upgrade.php accessible', 'Database upgrade script publicly reachable'),
             ('/wp-content/debug.log',   lambda r: r.status_code == 200 and len(r.text) > 10,
              'HIGH',   'debug.log exposed', 'WordPress debug log publicly accessible - potential data leak'),
@@ -1456,16 +1485,17 @@ class EndpointDiscovery:
             print(f"  {C.GREEN}✓{C.RESET} No confirmed CVEs for detected plugins")
             self.vprint(f"  {C.DIM}(CVE database covers {len(EFFECTIVE_CVE_DB)} plugin families){C.RESET}", level=1)
 
-        # "Possible" entries (version not readable) shown only in verbose mode
+        # "Possible" entries (version not readable): only show with --aggressive.
+        # Showing unconfirmed CVEs as warnings is misleading without version proof.
         if possible:
-            if self.verbosity >= 1:
-                print(f"\n  {C.DIM}── Possible findings (version could not be read) ──{C.RESET}")
+            if self.aggressive:
+                print(f"\n  {C.DIM}── Speculative findings (plugin detected, version unreadable) ──{C.RESET}")
                 for f in possible:
                     sev = sev_color(f['severity'])
-                    print(f"  {C.DIM}⚠ {sev} {f['slug']}  {f['cve']}  CVSS {f['cvss']}{C.RESET}")
+                    print(f"  {C.DIM}? {sev} {f['slug']}  {f['cve']}  CVSS {f['cvss']}  [UNCONFIRMED]{C.RESET}")
             else:
-                print(f"  {C.DIM}ℹ  {len(possible)} additional finding(s) where plugin version"
-                      f" could not be read — run with -v to show{C.RESET}")
+                print(f"  {C.DIM}ℹ  {len(possible)} speculative CVE match(es) suppressed"
+                      f" (version unreadable) — rerun with --aggressive to show{C.RESET}")
 
         # ── PHASE 3: SECURITY HEADERS ────────────────────────────────────────
         self._section(3, TOTAL_PHASES, "Security Headers")

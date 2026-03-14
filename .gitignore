@@ -2,6 +2,8 @@
 endpoint_discovery/
 *.json
 *.md
+!README.md
+!HISTORY.md
 *.tzt
 *.png
 __pycache__/

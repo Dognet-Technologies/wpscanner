@@ -1667,7 +1667,9 @@ class EndpointDiscovery:
                 if not api_data:
                     continue
                 for vuln in api_data.get('vulnerabilities', []):
-                    cvss_score = float(vuln.get('cvss', {}).get('score') or 0)
+                    if not vuln:
+                        continue
+                    cvss_score = float((vuln.get('cvss') or {}).get('score') or 0)
                     cve_list   = vuln.get('references', {}).get('cve') or []
                     cve_id     = f"CVE-{cve_list[0]}" if cve_list else vuln.get('title', '')
                     if cve_id in seen_cves:

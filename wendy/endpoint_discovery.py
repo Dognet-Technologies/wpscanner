@@ -23,12 +23,14 @@ from requests.adapters import HTTPAdapter
 import warnings
 warnings.filterwarnings('ignore')
 
-# Load API keys from wendy/.keys before anything else reads os.environ
+# Load API keys and probe config — must happen before module-level constants below
 try:
-    from wendy.config import load_keys
+    from wendy.config import load_keys, load_probe_config
 except ImportError:
-    from config import load_keys
+    from config import load_keys, load_probe_config
+
 load_keys()
+_PROBE_CFG = load_probe_config()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI COLOR HELPERS
@@ -152,13 +154,6 @@ CVE_DATABASE = {
 # PROBE CONFIGURATION  (read from wendy/.keys / env, see .keys.example)
 # ─────────────────────────────────────────────────────────────────────────────
 
-try:
-    from wendy.config import load_probe_config
-except ImportError:
-    from config import load_probe_config
-
-_PROBE_CFG = load_probe_config()
-
 NORMAL_MODE_PROBE_LIMIT  = _PROBE_CFG['probe_normal_limit']
 NORMAL_MODE_THEME_LIMIT  = _PROBE_CFG['probe_theme_limit']
 RECENT_CVE_YEARS         = _PROBE_CFG['cve_years']
@@ -228,9 +223,8 @@ EFFECTIVE_CVE_DB, EFFECTIVE_THEME_CVE_DB, INSTALLS_INDEX, POPULAR_THEMES = _load
 # INSTALLS SCORING  (graduated, mirrors WP.org active_installs bands)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _installs_score(slug):
-    """Return a popularity score (0–10) based on WordPress.org active_installs."""
-    n = INSTALLS_INDEX.get(slug, 0)
+def _installs_score(n):
+    """Return a popularity score (0–10) from a WordPress.org active_installs count."""
     if   n >= 1_000_000: return 10
     elif n >= 500_000:   return 9
     elif n >= 100_000:   return 7
@@ -241,6 +235,20 @@ def _installs_score(slug):
     else:                return 0
 
 
+# Pre-build a frozenset of CVE IDs whose year falls in RECENT_CVE_YEARS.
+# Used in the scoring hot-loop to replace per-entry regex with an O(1) lookup.
+_CVE_YEAR_RE  = re.compile(r'CVE-(\d{4})-')
+RECENT_CVE_IDS: frozenset = frozenset(
+    cve_id
+    for entries in EFFECTIVE_CVE_DB.values()
+    for entry   in entries
+    for cve_id  in (entry[1] if len(entry) > 1 else '',)
+    if  cve_id
+    for m        in (_CVE_YEAR_RE.match(cve_id),)
+    if  m and int(m.group(1)) in RECENT_CVE_YEARS
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PRIORITY PROBE LIST BUILDER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,8 +257,8 @@ def _build_priority_probe_list(exclude_set, limit=None, min_installs=0):
     """Score and sort all CVE-DB plugin slugs for smart probing.
 
     Score per slug (cumulative across all its CVEs):
-      0–10  installs_score()  – graduated WordPress.org active_installs bands
-      +3    per CVE from a recent year (RECENT_CVE_YEARS)
+      0–10  _installs_score(n)  – graduated WordPress.org active_installs bands
+      +3    per CVE in RECENT_CVE_IDS  (year in RECENT_CVE_YEARS)
       +2    per CRITICAL CVE
       +1    per HIGH CVE
 
@@ -266,15 +274,15 @@ def _build_priority_probe_list(exclude_set, limit=None, min_installs=0):
         if slug in exclude_set:
             continue
 
-        score           = _installs_score(slug)
+        installs        = INSTALLS_INDEX.get(slug, 0)   # single lookup reused below
+        score           = _installs_score(installs)
         has_recent_crit = False
 
         for entry in entries:
             cve_id   = entry[1] if len(entry) > 1 else ''
             severity = (entry[2] if len(entry) > 2 else '').upper()
 
-            m = re.search(r'CVE-(\d{4})-', cve_id or '')
-            is_recent = m and int(m.group(1)) in RECENT_CVE_YEARS
+            is_recent = cve_id in RECENT_CVE_IDS        # O(1) set lookup
             if is_recent:
                 score += 3
                 if severity == 'CRITICAL':
@@ -285,12 +293,10 @@ def _build_priority_probe_list(exclude_set, limit=None, min_installs=0):
             elif severity == 'HIGH':
                 score += 1
 
-        # Apply MIN_ACTIVE_INSTALLS filter:
-        # skip low-installs slugs unless they carry a recent CRITICAL CVE
-        if min_installs > 0:
-            known_installs = INSTALLS_INDEX.get(slug, 0)
-            if known_installs < min_installs and not has_recent_crit:
-                continue
+        # Skip low-installs slugs in filtered mode unless they carry a
+        # recent CRITICAL CVE (those are always probed — security priority).
+        if min_installs > 0 and installs < min_installs and not has_recent_crit:
+            continue
 
         scored.append((score, slug))
 
@@ -602,7 +608,7 @@ class EndpointDiscovery:
 
         # ── Theme detection ─────────────────────────────────────────────────
         # Priority: (1) theme CVE slugs from Wordfence, (2) popular from WP.org,
-        # (3) hardcoded baseline fallback.
+        # (3) hardcoded baseline fallback (always included as safety net).
         _baseline_themes = [
             'twentytwentyfour','twentytwentythree','twentytwentytwo',
             'divi','avada','astra','hello-elementor','neve','generatepress',
@@ -610,25 +616,27 @@ class EndpointDiscovery:
             'blocksy','kadence',
         ]
         _theme_cve_slugs = list(EFFECTIVE_THEME_CVE_DB.keys())
-        _theme_popular   = [s for s in POPULAR_THEMES  if s not in set(_theme_cve_slugs)]
+        _theme_cve_set   = set(_theme_cve_slugs)
+        _theme_popular   = [s for s in POPULAR_THEMES if s not in _theme_cve_set]
+        _theme_pop_set   = set(_theme_popular)
         _theme_baseline  = [s for s in _baseline_themes
-                            if s not in set(_theme_cve_slugs) and s not in set(_theme_popular)]
+                            if s not in _theme_cve_set and s not in _theme_pop_set]
 
         if self.aggressive:
             theme_probe = _theme_cve_slugs + _theme_popular + _theme_baseline + [
                 'betheme','jupiter','woodmart','porto','electro','thrive-themes',
             ]
         else:
-            theme_probe = (
-                _theme_cve_slugs[:NORMAL_MODE_THEME_LIMIT] +
-                [s for s in _theme_popular[:NORMAL_MODE_THEME_LIMIT]
-                 if s not in set(_theme_cve_slugs)] +
-                _theme_baseline
-            )
+            # Fill up to NORMAL_MODE_THEME_LIMIT with CVE themes then popular themes,
+            # then always append baseline fallbacks (they're few and always relevant).
+            _priority   = _theme_cve_slugs + [s for s in _theme_popular
+                                               if s not in _theme_cve_set]
+            _capped     = _priority[:NORMAL_MODE_THEME_LIMIT]
+            _capped_set = set(_capped)
+            theme_probe = _capped + [s for s in _theme_baseline if s not in _capped_set]
 
-        theme_probe = [s for s in theme_probe if s not in themes_from_html]
-        seen_t = set()
-        theme_probe = [s for s in theme_probe if not (s in seen_t or seen_t.add(s))]
+        # Exclude already-found themes and deduplicate (preserving priority order)
+        theme_probe = list(dict.fromkeys(s for s in theme_probe if s not in themes_from_html))
 
         # Baseline for themes
         _canary_theme_url = f"{base_url.rstrip('/')}/wp-content/themes/{_canary}/style.css"

@@ -30,6 +30,7 @@ import sys
 import datetime
 import argparse
 import requests
+from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Load API keys from wendy/.keys before anything else reads os.environ
 try:
@@ -53,6 +54,8 @@ WP_ORG_PLUGIN_API            = "https://api.wordpress.org/plugins/info/1.2/"
 WP_ORG_THEME_API             = "https://api.wordpress.org/themes/info/1.2/"
 WP_ORG_POPULAR_PLUGINS_LIMIT = 10000   # plugins indexed for installs data + scoring
 WP_ORG_POPULAR_THEMES_LIMIT  = 500     # themes cached for smart theme probing
+
+_USER_AGENT = 'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSION COMPARISON (mirrors EndpointDiscovery._parse_ver logic)
@@ -120,7 +123,7 @@ def fetch_popular_wp_org(kind='plugin', limit=10000, timeout=30):
         try:
             r = requests.get(
                 api_url, params=params, timeout=timeout,
-                headers={'User-Agent': 'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)'},
+                headers={'User-Agent': _USER_AGENT},
             )
             r.raise_for_status()
             data = r.json()
@@ -355,20 +358,18 @@ def run_db_update(path=DB_PATH, verbose=True):
     except Exception as e:
         return False, f"Fetch failed: {e}"
 
-    # Fetch WordPress.org installs index (best-effort; failures are non-fatal)
-    installs_index = {}
-    popular_themes = []
-    try:
-        if verbose:
-            print(f"  Fetching installs index from WordPress.org...", end=' ', flush=True)
-        installs_index = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
-        themes_dict    = fetch_popular_wp_org('theme',  WP_ORG_POPULAR_THEMES_LIMIT)
-        popular_themes = list(themes_dict.keys())
-        if verbose:
-            print(f"done ({len(installs_index):,} plugins, {len(popular_themes):,} themes)", flush=True)
-    except Exception as e:
-        if verbose:
-            print(f"skipped ({e})", flush=True)
+    # Fetch WordPress.org installs index in parallel with theme list (best-effort;
+    # fetch_popular_wp_org swallows network errors and returns {} on failure).
+    if verbose:
+        print("  Fetching installs index from WordPress.org...", end=' ', flush=True)
+    with _TPE(max_workers=2) as ex:
+        f_plugins = ex.submit(fetch_popular_wp_org, 'plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+        f_themes  = ex.submit(fetch_popular_wp_org, 'theme',  WP_ORG_POPULAR_THEMES_LIMIT)
+        installs_index = f_plugins.result()
+        themes_dict    = f_themes.result()
+    popular_themes = list(themes_dict.keys())
+    if verbose:
+        print(f"done ({len(installs_index):,} plugins, {len(popular_themes):,} themes)", flush=True)
 
     try:
         db_plugins, db_themes, _ = parse_feed(data)
@@ -457,7 +458,7 @@ def save_db(db_plugins, db_themes=None, path=DB_PATH, source_url=FEED_URL,
         'themes':        len(db_themes),
         'theme_entries': total_theme_entries,
     }
-    if installs_index is not None:
+    if installs_index:   # only persist when WP.org fetch actually returned data
         meta['installs_index']  = installs_index    # {slug: N}
         meta['popular_themes']  = popular_themes or []
         meta['popular_updated'] = now
@@ -530,15 +531,16 @@ def main():
         print("\nDry-run mode: skipping save and popular fetch.")
         return
 
-    # Fetch WordPress.org installs index (best-effort)
+    # Fetch WordPress.org installs index + theme list in parallel (best-effort)
     print()
-    print(f"  Fetching installs index from WordPress.org...", end=' ', flush=True)
-    installs_index = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
-    print(f"done ({len(installs_index):,} plugins)")
-    print(f"  Fetching popular themes  from WordPress.org...", end=' ', flush=True)
-    themes_dict    = fetch_popular_wp_org('theme', WP_ORG_POPULAR_THEMES_LIMIT)
+    print("  Fetching installs index from WordPress.org...", end=' ', flush=True)
+    with _TPE(max_workers=2) as ex:
+        f_plugins = ex.submit(fetch_popular_wp_org, 'plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+        f_themes  = ex.submit(fetch_popular_wp_org, 'theme',  WP_ORG_POPULAR_THEMES_LIMIT)
+        installs_index = f_plugins.result()
+        themes_dict    = f_themes.result()
     popular_themes = list(themes_dict.keys())
-    print(f"done ({len(popular_themes):,} themes)")
+    print(f"done ({len(installs_index):,} plugins, {len(popular_themes):,} themes)")
     print()
 
     # Save

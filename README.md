@@ -15,10 +15,13 @@ testing** e **bug bounty** su ambienti WordPress.
 
 ### Core (tutte le modalità)
 - **WordPress Detection** – versione, tema attivo, plugin attivi
-- **Plugin/Theme Discovery** – 80+ plugin, 16+ temi comuni; versione letta
-  direttamente da `readme.txt`
+- **Plugin/Theme Discovery** – fino a 15 000+ plugin e temi da database CVE
+  live (Wordfence Intelligence); versione letta direttamente da `readme.txt`
+- **Smart Probing** – in modalità normale proba i top 3 000 slug ordinati per
+  score di priorità (popolarità WP.org × CVE recenti × severità); modalità
+  aggressive proba tutto il database
 - **CVE Matching** – confronto versione installata vs database vulnerabilità;
-  riporta CVE ID, CVSS score, severità, descrizione
+  riporta CVE ID, CVSS score, severità, descrizione; supporta plugin e temi
 - **Security Headers** – verifica HSTS, CSP, X-Frame-Options, Referrer-Policy
   e altri 5 header; distingue CRITICAL vs OPTIONAL
 - **User Enumeration** – REST API `/wp-json/wp/v2/users`, author archives
@@ -30,26 +33,42 @@ testing** e **bug bounty** su ambienti WordPress.
 
 ### Aggressive mode (`--aggressive`)
 - User enumeration estesa (fino a 20 author ID; login error differential)
-- Plugin discovery estesa (50+ plugin aggiuntivi)
-- Theme discovery estesa
+- Plugin e theme discovery senza limiti (tutti i 15 000+ slug CVE-DB)
 - WPScan API enrichment (richiede `WPSCAN_API_TOKEN` – vedi sotto)
 
 ---
 
 ## CVE Database
 
-WENDY usa **due livelli** di database vulnerabilità:
+WENDY usa **tre livelli** di database vulnerabilità:
 
 | Livello | Fonte | Aggiornamento | Auth |
 |---|---|---|---|
 | **Embedded** | Curato manualmente | Con il codice | Nessuna |
-| **Live** (`cve_db.json`) | Wordfence Intelligence | Settimanale con `update_db.py` | Nessuna |
+| **Live** (`cve_db.json`) | Wordfence Intelligence v3 | Settimanale con `-u` | API key gratuita |
 | **WPScan API** | wpscan.com/api/v3 | Real-time (aggressive mode) | Token gratuito |
 
-### Wordfence Intelligence (feed pubblico)
-Il feed `cve_db.json` viene generato da `wendy/update_db.py` che scarica
-da `https://www.wordfence.com/api/intelligence/v2/vulnerabilities/production/`
-— pubblico, senza autenticazione.
+### Wordfence Intelligence v3 (feed live)
+Il feed `cve_db.json` è generato da `wendy/update_db.py` che scarica da
+`https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production/`
+e richiede una **API key gratuita** di Wordfence.
+
+In aggiunta, l'updater recupera in parallelo dal **WordPress.org public API**
+(no auth) la lista dei plugin e temi più popolari per installs — usata per
+prioritizzare il probing. L'indice viene memorizzato in `cve_db.json` e
+aggiornato ad ogni `-u`.
+
+**Setup iniziale:**
+```bash
+# 1. Copia il file di configurazione
+cp wendy/.keys.example wendy/.keys
+
+# 2. Aggiungi la tua API key Wordfence (gratuita su wordfence.com/intelligence)
+echo "WORDFENCE_API_KEY=your_key_here" >> wendy/.keys
+
+# 3. Aggiorna il database
+python wendy/update_db.py
+```
 
 **Aggiornamento settimanale consigliato:**
 ```bash
@@ -178,29 +197,55 @@ python wendy/update_db.py --dry-run
 ```
 wpscanner/
 ├── wendy/
-│   ├── endpoint_discovery.py   # Scanner principale (v0.3.0)
-│   └── update_db.py            # Updater database CVE da Wordfence Intelligence
+│   ├── endpoint_discovery.py   # Scanner principale
+│   ├── update_db.py            # Updater CVE DB (Wordfence v3 + WP.org installs)
+│   ├── config.py               # Loader API keys e probe tuning da .keys
+│   ├── .keys.example           # Template configurazione (copiare in .keys)
+│   └── .keys                   # Configurazione locale (gitignored)
 ├── bypass_wordfence/
 │   └── waf_bypass_tester.py    # WAF bypass tester standalone
 ├── CVE-2023-5360-RoyalElementorAddons/
 │   └── royal_elementor_rce_tester.py
 ├── CVE-2025-30567-WP01-PathTraversal/
 │   └── CVE-2025-30567.py
+├── HISTORY.md                  # Log decisioni architetturali (gitignored)
 ├── LICENSE
 └── README.md
 ```
 
 File generati localmente (gitignored):
-- `wendy/cve_db.json` – database CVE live (generato da `update_db.py`)
-- `HISTORY.md` – log decisioni architetturali
+- `wendy/cve_db.json` – database CVE live + indice installs (generato da `update_db.py`)
+- `wendy/.keys` – configurazione API key e probe tuning
 
 ---
 
-## Variabili d'ambiente
+## Configurazione (`wendy/.keys`)
 
-| Variabile | Utilizzo |
+Copia `wendy/.keys.example` in `wendy/.keys` e compila i valori:
+
+| Chiave | Tipo | Utilizzo |
+|---|---|---|
+| `WORDFENCE_API_KEY` | **API key** | Feed CVE Wordfence Intelligence v3 (richiesto per `-u`) |
+| `WPSCAN_API_TOKEN` | **API token** | WPScan enrichment in `--aggressive` mode |
+| `MIN_ACTIVE_INSTALLS` | int | Minimo installazioni per includere un plugin in normal mode (default: `0` = nessun filtro) |
+| `PROBE_NORMAL_LIMIT` | int | Max plugin testati in modalità normale (default: `3000`) |
+| `PROBE_THEME_LIMIT` | int | Max temi testati in modalità normale (default: `100`) |
+| `INSTALLS_INDEX_LIMIT` | int | Plugin da indicizzare da WP.org per scoring (default: `10000`) |
+| `CVE_YEARS` | stringa | Anni CVE considerati "recenti" per lo scoring (default: `2024,2025,2026`) |
+
+Tutti i valori supportano anche variabili d'ambiente standard (utile in CI/CD).
+
+### Esempi di tuning `MIN_ACTIVE_INSTALLS`
+
+| Valore | Effetto |
 |---|---|
-| `WPSCAN_API_TOKEN` | Token WPScan API per enrichment in `--aggressive` mode |
+| `0` | Nessun filtro — proba tutti i ~15 000 slug CVE-DB in aggressive, top 3000 in normal |
+| `1000` | Salta plugin ultra-niche; riduzione significativa della lista |
+| `10000` | Copre ~95% dei target reali; scan rapido |
+| `100000` | Solo plugin molto diffusi; scan velocissimo, copertura ridotta |
+
+> **Nota sicurezza:** plugin con CVE CRITICAL degli anni in `CVE_YEARS` sono sempre
+> testati, indipendentemente da `MIN_ACTIVE_INSTALLS`.
 
 ---
 
@@ -219,15 +264,32 @@ Gli autori declinano ogni responsabilità per usi impropri.
 
 ## Changelog
 
+### v0.4.0
+- **Smart probe prioritization**: in normal mode proba i top 3 000 plugin/temi
+  ordinati per score (popolarità WP.org × CVE recenti × severità CVSS)
+- **WordPress.org installs index**: durante `-u` vengono scaricati in parallelo
+  i top 10 000 plugin e 500 temi per `active_installs`; memorizzati in `cve_db.json`
+- **Filtro installazioni configurabile** (`MIN_ACTIVE_INSTALLS`): esclude plugin
+  troppo rari in normal mode; plugin con CVE CRITICAL recenti sono sempre inclusi
+- **Theme CVE DB**: `parse_feed()` ora include anche le vulnerabilità dei temi
+  (tipo `theme` nel feed Wordfence); lista temi probe ora dinamica (CVE + popular + baseline)
+- **Probe tuning via `.keys`**: tutti i limiti configurabili senza modificare il codice
+  (`PROBE_NORMAL_LIMIT`, `PROBE_THEME_LIMIT`, `CVE_YEARS`, `INSTALLS_INDEX_LIMIT`)
+- **Upgrade feed Wordfence**: da v2 (pubblico, no auth) a v3 (richiede API key gratuita)
+- **`config.py`**: nuovo modulo `load_probe_config()` — legge e valida i parametri
+  di tuning da `.keys` / env con defaults sensati
+- **Fix code quality**: eliminato doppio lookup `INSTALLS_INDEX`, regex pre-compilata
+  (`RECENT_CVE_IDS` frozenset), set creati una sola volta nel theme probe,
+  deduplication con `dict.fromkeys`, rimosso try/except ridondante in `run_db_update`
+
 ### v0.3.0
 - Aggiunto `wendy/update_db.py`: aggiornamento settimanale CVE da Wordfence
-  Intelligence (pubblico, no auth, nessun token richiesto)
-- Database CVE ora a due livelli: embedded (fallback offline) + `cve_db.json` (live)
+  Intelligence v2 (pubblico, no auth)
+- Database CVE a due livelli: embedded (fallback offline) + `cve_db.json` (live)
 - Merge intelligente: deduplicazione per CVE ID, embedded ha priorità sul live
-- Fix: WPScan API response parsing (la chiave top-level è lo slug del plugin)
-- Fix: WPScan API severity derivata dal CVSS score numerico, non dal vettore
+- Fix: WPScan API response parsing (chiave top-level = slug del plugin)
+- Fix: WPScan API severity derivata da CVSS score numerico, non dal vettore
 - Fix: Author archive enumeration non cattura più il titolo homepage come username
-- Rimosso codice morto nel blocco security headers
 
 ### v0.2.0
 - Scanner di sicurezza completo (CVE, headers, user enum, XML-RPC, hardening)

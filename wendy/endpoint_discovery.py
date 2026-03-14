@@ -1668,7 +1668,7 @@ class EndpointDiscovery:
 
         # Endpoint results detail
         if all_interesting:
-            print(f"\n  Found {C.BOLD}{len(all_interesting)}{C.RESET} interesting endpoints")
+            print(f"  Found {C.BOLD}{len(all_interesting)}{C.RESET} interesting endpoint(s)")
             by_status = {}
             bypass_results = []
             for r in all_interesting:
@@ -1676,66 +1676,92 @@ class EndpointDiscovery:
                 by_status.setdefault(s, []).append(r)
                 bypass_results.extend(r.get('bypasses', []))
 
-            for status, results in by_status.items():
-                print(f"\n  {'─'*56}")
-                print(f"  STATUS {status}  ({len(results)} endpoint{'s' if len(results)>1 else ''})")
-                print(f"  {'─'*56}")
-                for r in results:
-                    icon = "📁" if r.get('is_directory') else "📄"
-                    print(f"\n  {icon} {r['endpoint']}")
-                    print(f"     └─ {r.get('reason','N/A')}")
-                    if r.get('verification'):
-                        print(f"     └─ Verification: {r['verification']}")
-                    if r.get('preview') and not r.get('is_false_positive') and self.verbosity >= 1:
-                        prev = r['preview'][:100].replace('\n',' ').strip()
-                        print(f"     └─ Preview: {prev}...")
-                    if self.verbosity >= 1 and status not in (301, 302):
-                        print(f"     └─ Actions:")
-                        if r.get('browser_command'):
-                            print(f"        • Browser : {r['browser_command']}")
-                        if r.get('download_command') and not r.get('is_directory'):
-                            print(f"        • Download: {r['download_command']}")
-                        print(f"        • Curl    : {r['curl_command']}")
-                    if r.get('bypasses'):
-                        verified_bp = [b for b in r['bypasses'] if not b.get('needs_verification')]
-                        check_bp    = [b for b in r['bypasses'] if b.get('needs_verification')]
-                        if verified_bp:
-                            print(f"\n     {C.GREEN}✓ VERIFIED BYPASSES ({len(verified_bp)}):{C.RESET}")
-                            for bp in verified_bp:
-                                self._print_bypass_details(bp)
-                        if check_bp:
-                            print(f"\n     {C.YELLOW}⚠ BYPASSES NEEDING VERIFICATION ({len(check_bp)}):{C.RESET}")
-                            for bp in check_bp:
-                                self._print_bypass_details(bp, show_warning=True)
+            # Full per-endpoint detail only at verbosity >= 1
+            if self.verbosity >= 1:
+                for status, results in by_status.items():
+                    print(f"\n  {'─'*56}")
+                    print(f"  STATUS {status}  ({len(results)} endpoint{'s' if len(results)>1 else ''})")
+                    print(f"  {'─'*56}")
+                    for r in results:
+                        icon = "📁" if r.get('is_directory') else "📄"
+                        print(f"\n  {icon} {r['endpoint']}")
+                        print(f"     └─ {r.get('reason','N/A')}")
+                        if r.get('verification'):
+                            print(f"     └─ Verification: {r['verification']}")
+                        if r.get('preview') and not r.get('is_false_positive'):
+                            prev = r['preview'][:100].replace('\n',' ').strip()
+                            print(f"     └─ Preview: {prev}...")
+                        # Actions: only for non-403 and non-redirect, at verbosity >= 1
+                        if status not in (301, 302, 403):
+                            if r.get('browser_command'):
+                                print(f"     └─ Browser : {r['browser_command']}")
+                            if r.get('download_command') and not r.get('is_directory'):
+                                print(f"     └─ Download: {r['download_command']}")
+                            print(f"     └─ Curl    : {r['curl_command']}")
+                        if r.get('bypasses'):
+                            verified_bp = [b for b in r['bypasses'] if not b.get('needs_verification')]
+                            check_bp    = [b for b in r['bypasses'] if b.get('needs_verification')]
+                            if verified_bp:
+                                print(f"\n     {C.GREEN}✓ VERIFIED BYPASSES ({len(verified_bp)}):{C.RESET}")
+                                for bp in verified_bp:
+                                    self._print_bypass_details(bp)
+                            if check_bp:
+                                print(f"\n     {C.YELLOW}⚠ BYPASSES NEEDING VERIFICATION ({len(check_bp)}):{C.RESET}")
+                                for bp in check_bp:
+                                    self._print_bypass_details(bp, show_warning=True)
 
-            if bypass_results:
-                print(f"\n  {'─'*56}")
-                print(f"  403 BYPASS SUMMARY  ({len(bypass_results)} techniques worked)")
-                print(f"  {'─'*56}")
-                by_method = {}
-                for bp in bypass_results:
-                    m = bp['method'].split('(')[0].strip()
-                    by_method[m] = by_method.get(m, 0) + 1
-                for m, cnt in sorted(by_method.items(), key=lambda x: -x[1]):
-                    print(f"    • {m}: {cnt}")
+                if bypass_results:
+                    print(f"\n  {'─'*56}")
+                    print(f"  403 BYPASS SUMMARY  ({len(bypass_results)} techniques worked)")
+                    print(f"  {'─'*56}")
+                    by_method = {}
+                    for bp in bypass_results:
+                        m = bp['method'].split('(')[0].strip()
+                        by_method[m] = by_method.get(m, 0) + 1
+                    for m, cnt in sorted(by_method.items(), key=lambda x: -x[1]):
+                        print(f"    • {m}: {cnt}")
+            else:
+                # Default verbosity: just a compact status summary
+                for status, results in sorted(by_status.items()):
+                    paths = ', '.join(r['endpoint'] for r in results[:5])
+                    more  = f" +{len(results)-5} more" if len(results) > 5 else ""
+                    print(f"    {C.DIM}[{status}] {paths}{more}{C.RESET}")
         else:
             print(f"  {C.GREEN}✓{C.RESET} No interesting endpoints found in scan")
 
         # ── PHASE 8: SUMMARY ─────────────────────────────────────────────────
         self._section(8, TOTAL_PHASES, "Security Report Summary")
 
-        # Collect all findings for scoring
-        all_sev = []
+        # Collect all findings for scoring + summary detail
+        summary_findings = []  # (severity, label, detail)
+
         for f in cve_findings:
-            all_sev.append(f['severity'])
+            summary_findings.append((
+                f['severity'],
+                f"{f['slug']} {f['cve']}",
+                f"CVSS {f['cvss']}  {f['desc']}",
+            ))
         for f in xmlrpc_findings:
-            all_sev.append(f.get('severity','MEDIUM'))
+            summary_findings.append((
+                f.get('severity','MEDIUM'),
+                f"XML-RPC: {f['desc']}",
+                '',
+            ))
         for f in hardening_issues:
-            all_sev.append(f.get('severity','LOW'))
+            summary_findings.append((
+                f.get('severity','LOW'),
+                f['title'],
+                f.get('desc',''),
+            ))
         for h in (header_findings or []):
             if not h['present'] and h['critical']:
-                all_sev.append('MEDIUM')
+                summary_findings.append((
+                    'MEDIUM',
+                    f"Missing header: {h['header']}",
+                    h.get('risk',''),
+                ))
 
+        all_sev = [s for s, _, _ in summary_findings]
         counts = {s: all_sev.count(s) for s in ['CRITICAL','HIGH','MEDIUM','LOW']}
         counts['INFO'] = len(all_interesting)
 
@@ -1752,12 +1778,31 @@ class EndpointDiscovery:
                 print(f"  {color}{sev:<10}{C.RESET}  {cnt:>3}  {color}{bar}{C.RESET}")
         print(f"  {'═'*56}")
 
+        # List vulnerabilities by severity (INFO only at verbosity >= 1)
+        sev_order = ['CRITICAL','HIGH','MEDIUM','LOW']
+        shown = [(s,l,d) for s,l,d in summary_findings if s in sev_order]
+        shown.sort(key=lambda x: sev_order.index(x[0]))
+        if shown:
+            print()
+            for sev, label, detail in shown:
+                color = (C.RED+C.BOLD if sev=='CRITICAL' else
+                         C.RED if sev=='HIGH' else
+                         C.YELLOW if sev=='MEDIUM' else C.DIM)
+                print(f"  {color}[{sev}]{C.RESET}  {label}")
+                if detail:
+                    print(f"    {C.DIM}{detail}{C.RESET}")
+        if self.verbosity >= 1 and all_interesting:
+            print()
+            for r in all_interesting:
+                print(f"  {C.CYAN}[INFO]{C.RESET}  {r['endpoint']}  {C.DIM}{r.get('reason','')}{C.RESET}")
+
+        print()
         if counts['CRITICAL'] > 0 or counts['HIGH'] > 0:
-            print(f"\n  {C.RED}{C.BOLD}⚠  High-severity issues found - immediate action recommended{C.RESET}")
+            print(f"  {C.RED}{C.BOLD}⚠  High-severity issues found - immediate action recommended{C.RESET}")
         elif counts['MEDIUM'] > 0:
-            print(f"\n  {C.YELLOW}⚠  Medium-severity issues found - review and remediate{C.RESET}")
+            print(f"  {C.YELLOW}⚠  Medium-severity issues found - review and remediate{C.RESET}")
         else:
-            print(f"\n  {C.GREEN}✓  No critical/high severity issues found{C.RESET}")
+            print(f"  {C.GREEN}✓  No critical/high severity issues found{C.RESET}")
 
         if self.aggressive and os.environ.get('WPSCAN_API_TOKEN'):
             print(f"  {C.DIM}(Extended CVE lookup performed via WPScan API){C.RESET}")

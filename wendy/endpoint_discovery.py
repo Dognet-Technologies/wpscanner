@@ -149,6 +149,17 @@ CVE_DATABASE = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PROBE PRIORITY SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Max slugs to probe in normal (non-aggressive) mode
+NORMAL_MODE_PROBE_LIMIT  = 3000
+NORMAL_MODE_THEME_LIMIT  = 100
+
+# CVE years considered "recent" → extra priority score
+RECENT_CVE_YEARS = {2024, 2025, 2026}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LIVE CVE DATABASE LOADER
 # Loads wendy/cve_db.json (produced by update_db.py) and merges it with the
 # embedded CVE_DATABASE above.  The JSON file is gitignored and generated
@@ -157,42 +168,96 @@ CVE_DATABASE = {
 
 def _load_cve_db():
     """
-    Return the effective CVE database, merging embedded + cve_db.json.
+    Load and merge plugin/theme CVE databases and popular lists from cve_db.json.
 
-    Priority: embedded entries are kept as-is; additional entries from the
-    JSON file are appended unless the same CVE ID is already present.
+    Returns (db_plugins, db_themes, popular_plugins, popular_themes).
+    db_plugins merges embedded CVE_DATABASE with the JSON file.
+    db_themes and popular lists come exclusively from the JSON file (no embedded fallback).
+    Falls back to (CVE_DATABASE, {}, [], []) when the file is absent/corrupt.
     """
     json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cve_db.json')
     if not os.path.exists(json_path):
-        return CVE_DATABASE
+        return CVE_DATABASE, {}, [], []
 
     try:
         with open(json_path, encoding='utf-8') as fh:
             raw = json.load(fh)
     except Exception:
-        return CVE_DATABASE   # corrupted file → fall back
+        return CVE_DATABASE, {}, [], []   # corrupted file → fall back
 
-    raw.pop('_meta', None)   # strip metadata block
+    # Extract auxiliary sections before they get merged into the plugin DB
+    meta            = raw.pop('_meta',   {})
+    db_themes_raw   = raw.pop('_themes', {})
+    popular_plugins = meta.get('popular_plugins', [])
+    popular_themes  = meta.get('popular_themes',  [])
 
+    # Build plugin DB: embedded entries take priority
     db = {slug: list(entries) for slug, entries in CVE_DATABASE.items()}
-
     for slug, json_entries in raw.items():
-        existing = db.get(slug, [])
-        # Collect CVE IDs already present for this plugin
+        existing   = db.get(slug, [])
         known_cves = {e[1] for e in existing if e[1]}
         for entry in json_entries:
             if not isinstance(entry, list) or len(entry) < 5:
                 continue
             cve_id = entry[1]
             if cve_id and cve_id in known_cves:
-                continue   # already in embedded DB
+                continue
             known_cves.add(cve_id)
             db.setdefault(slug, []).append(tuple(entry))
 
-    return db
+    # Build theme DB
+    db_themes = {}
+    for slug, entries in db_themes_raw.items():
+        db_themes[slug] = [tuple(e) for e in entries if isinstance(e, list) and len(e) >= 5]
+
+    return db, db_themes, popular_plugins, popular_themes
 
 
-EFFECTIVE_CVE_DB = _load_cve_db()
+EFFECTIVE_CVE_DB, EFFECTIVE_THEME_CVE_DB, POPULAR_PLUGINS, POPULAR_THEMES = _load_cve_db()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRIORITY PROBE LIST BUILDER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_priority_probe_list(exclude_set, limit=None):
+    """Score and sort all CVE-DB plugin slugs for smart probing.
+
+    Score per slug (cumulative across all its CVEs):
+      +4  slug in WP.org popular list    (widely installed → high hit probability)
+      +3  per CVE from a recent year     (2024/2025/2026 → actively researched/exploited)
+      +2  per CRITICAL CVE               (CVSS 9.0–10.0)
+      +1  per HIGH CVE                   (CVSS 7.0–8.9)
+
+    Returns slugs sorted by score descending, capped at `limit` (None = all).
+    """
+    popular_set = set(POPULAR_PLUGINS)
+    scored = []
+
+    for slug, entries in EFFECTIVE_CVE_DB.items():
+        if slug in exclude_set:
+            continue
+
+        score = 4 if slug in popular_set else 0
+
+        for entry in entries:
+            cve_id   = entry[1] if len(entry) > 1 else ''
+            severity = (entry[2] if len(entry) > 2 else '').upper()
+
+            m = re.search(r'CVE-(\d{4})-', cve_id or '')
+            if m and int(m.group(1)) in RECENT_CVE_YEARS:
+                score += 3
+
+            if severity == 'CRITICAL':
+                score += 2
+            elif severity == 'HIGH':
+                score += 1
+
+        scored.append((score, slug))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    result = [slug for _, slug in scored]
+    return result[:limit] if limit is not None else result
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN CLASS
@@ -398,25 +463,17 @@ class EndpointDiscovery:
             html_plugins[slug] = self._get_plugin_version(base_url, slug)
         print(f"found {len(html_plugins)} plugin(s), {len(html_themes)} theme(s)", flush=True)
 
-        # ── STEP 2: Probe CVE-DB slugs (automatically in sync with the DB) ──────
-        # Primary list = every slug tracked in the effective CVE database so the
-        # probe set stays up-to-date without manual maintenance.
-        probe_slugs = [s for s in EFFECTIVE_CVE_DB.keys() if s not in html_plugins]
-        # Remove duplicates preserving order
-        seen = set()
-        probe_slugs = [s for s in probe_slugs if not (s in seen or seen.add(s))]
-
+        # ── STEP 2: Probe CVE-DB slugs — priority-scored ──────────────────────
+        # Slugs are scored by: WP.org popularity × recent CVE year × severity.
+        # Normal mode: top NORMAL_MODE_PROBE_LIMIT scored slugs.
+        # Aggressive mode: full CVE-DB, still ordered by priority score.
+        exclude = set(html_plugins)
         if self.aggressive:
-            probe_slugs += [
-                s for s in [
-                    'akismet','classic-editor','gutenberg','beaver-builder-plugin',
-                    'popup-maker','convert-pro','optinmonster','hustle',
-                    'buddypress','bbpress','lms-by-learndash','tutor',
-                    'paid-memberships-pro','woocommerce-subscriptions',
-                    'stripe-payments','woo-stripe-payment','paypal-for-woocommerce',
-                    'wp-simple-firewall','anti-malware',
-                ] if s not in html_plugins and s not in seen
-            ]
+            probe_slugs = _build_priority_probe_list(exclude_set=exclude)
+        else:
+            probe_slugs = _build_priority_probe_list(
+                exclude_set=exclude, limit=NORMAL_MODE_PROBE_LIMIT
+            )
 
         # Start with HTML-discovered plugins/themes as confirmed
         found = dict(html_plugins)
@@ -471,9 +528,16 @@ class EndpointDiscovery:
             return None, None
 
         total = len(probe_slugs)
-        done = 0
+        done  = 0
         if total > 0:
-            print(f"    Probing {total} additional slugs...", end='', flush=True)
+            db_total = len(EFFECTIVE_CVE_DB)
+            if self.aggressive:
+                mode_label = f"aggressive, all {total:,}/{db_total:,}"
+            else:
+                popular_in = sum(1 for s in probe_slugs if s in set(POPULAR_PLUGINS))
+                mode_label = f"priority-scored {total:,}/{db_total:,}, {popular_in} popular"
+            self.vprint(f"    Probe mode: {mode_label}", level=1)
+            print(f"    Probing [{done:{len(str(total))}}/{total}]", end='', flush=True)
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 futures = {ex.submit(check_plugin, s): s for s in probe_slugs}
                 for fut in as_completed(futures):
@@ -481,20 +545,38 @@ class EndpointDiscovery:
                     slug, ver = fut.result()
                     if slug:
                         found[slug] = ver
-                        print(f"\r    Probing [{done:3}/{total}]  + {slug}"
+                        print(f"\r    Probing [{done:{len(str(total))}}/{total}]  + {slug}"
                               f"{'  v'+ver if ver else ''}", flush=True)
                     else:
-                        print(f"\r    Probing [{done:3}/{total}]", end='', flush=True)
+                        print(f"\r    Probing [{done:{len(str(total))}}/{total}]", end='', flush=True)
             print(flush=True)
 
         # ── Theme detection ─────────────────────────────────────────────────
-        # Start from HTML-discovered themes, then probe hardcoded list
-        theme_probe = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
-                       'divi','avada','astra','hello-elementor','neve','generatepress',
-                       'flatsome','storefront','oceanwp','enfold','bridge','salient',
-                       'blocksy','kadence','generatepress']
+        # Priority: (1) theme CVE slugs from Wordfence, (2) popular from WP.org,
+        # (3) hardcoded baseline fallback.
+        _baseline_themes = [
+            'twentytwentyfour','twentytwentythree','twentytwentytwo',
+            'divi','avada','astra','hello-elementor','neve','generatepress',
+            'flatsome','storefront','oceanwp','enfold','bridge','salient',
+            'blocksy','kadence',
+        ]
+        _theme_cve_slugs = list(EFFECTIVE_THEME_CVE_DB.keys())
+        _theme_popular   = [s for s in POPULAR_THEMES  if s not in set(_theme_cve_slugs)]
+        _theme_baseline  = [s for s in _baseline_themes
+                            if s not in set(_theme_cve_slugs) and s not in set(_theme_popular)]
+
         if self.aggressive:
-            theme_probe += ['betheme','jupiter','woodmart','porto','electro','thrive-themes']
+            theme_probe = _theme_cve_slugs + _theme_popular + _theme_baseline + [
+                'betheme','jupiter','woodmart','porto','electro','thrive-themes',
+            ]
+        else:
+            theme_probe = (
+                _theme_cve_slugs[:NORMAL_MODE_THEME_LIMIT] +
+                [s for s in _theme_popular[:NORMAL_MODE_THEME_LIMIT]
+                 if s not in set(_theme_cve_slugs)] +
+                _theme_baseline
+            )
+
         theme_probe = [s for s in theme_probe if s not in themes_from_html]
         seen_t = set()
         theme_probe = [s for s in theme_probe if not (s in seen_t or seen_t.add(s))]

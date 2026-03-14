@@ -25,6 +25,7 @@ and must be regenerated locally after each clone.
 
 import json
 import os
+import re
 import sys
 import datetime
 import argparse
@@ -46,6 +47,12 @@ DB_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cve_db.json
 
 # Only include CVEs at or above this CVSS score (0.0 = include all)
 MIN_CVSS = 0.0
+
+# WordPress.org public API (no auth required)
+WP_ORG_PLUGIN_API            = "https://api.wordpress.org/plugins/info/1.2/"
+WP_ORG_THEME_API             = "https://api.wordpress.org/themes/info/1.2/"
+WP_ORG_POPULAR_PLUGINS_LIMIT = 3000   # top N plugins to cache for smart probing
+WP_ORG_POPULAR_THEMES_LIMIT  = 500    # top N themes
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSION COMPARISON (mirrors EndpointDiscovery._parse_ver logic)
@@ -75,6 +82,66 @@ def _max_version(versions):
         if b > a:
             result = v
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WORDPRESS.ORG POPULAR LIST  (no auth – public API)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_popular_wp_org(kind='plugin', limit=3000, timeout=30):
+    """Fetch top N popular plugins or themes from WordPress.org (no auth required).
+
+    kind  : 'plugin' or 'theme'
+    limit : maximum number of slugs to return
+    Returns a list of slugs ordered by active_installs descending.
+    On any network error the function returns an empty list rather than raising.
+    """
+    api_url  = WP_ORG_PLUGIN_API if kind == 'plugin' else WP_ORG_THEME_API
+    action   = 'query_plugins'   if kind == 'plugin' else 'query_themes'
+    item_key = 'plugins'         if kind == 'plugin' else 'themes'
+    per_page = 100               # WP.org max per page
+    slugs    = []
+    page     = 1
+
+    while len(slugs) < limit:
+        params = {
+            'action':                            action,
+            'request[per_page]':                 per_page,
+            'request[page]':                     page,
+            'request[browse]':                   'popular',
+            'request[fields][active_installs]':  1,
+            'request[fields][versions]':         0,
+            'request[fields][banners]':          0,
+            'request[fields][screenshots]':      0,
+        }
+        try:
+            r = requests.get(
+                api_url, params=params, timeout=timeout,
+                headers={'User-Agent': 'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)'},
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            break
+
+        items = data.get(item_key, [])
+        if not items:
+            break
+
+        seen = set(slugs)
+        for item in items:
+            slug = item.get('slug', '').strip()
+            if slug and slug not in seen:
+                slugs.append(slug)
+                seen.add(slug)
+
+        info        = data.get('info', {})
+        total_pages = int(info.get('pages', 1))
+        if page >= total_pages or len(slugs) >= limit:
+            break
+        page += 1
+
+    return slugs[:limit]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,11 +208,11 @@ def parse_feed(data):
     Input structure per entry:
       {
         "id": "uuid",
-        "title": "Plugin <= X.Y.Z - Vuln type",
+        "title": "Plugin/Theme <= X.Y.Z - Vuln type",
         "software": [
           {
-            "type": "plugin",
-            "slug": "plugin-slug",
+            "type": "plugin" | "theme",
+            "slug": "slug",
             "affected_versions": {
               "* - 1.2.3": {
                 "from_version": "*", "from_inclusive": true,
@@ -154,18 +221,17 @@ def parse_feed(data):
             }
           }
         ],
-        "cve":         "CVE-2023-XXXXX",   # may be null
-        "cvss_rating": "critical",          # critical/high/medium/low/none
-        "cvss":        {"score": 9.8, ...},
-        "title":       "...",
+        "cve":  "CVE-2024-XXXXX",   # may be null
+        "cvss": {"score": 9.8, "rating": "critical", ...},
+        "title": "...",
       }
 
-    Output: { slug: [[max_vuln, cve_id, severity, cvss_score, desc], ...] }
+    Output: (db_plugins, db_themes, skipped)
+      db_plugins / db_themes : { slug: [[max_vuln, cve_id, severity, cvss_score, desc], ...] }
     """
-    import re as _re
-
-    db      = {}
-    skipped = 0
+    db_plugins = {}
+    db_themes  = {}
+    skipped    = 0
 
     for uid, vuln in data.items():
         if not isinstance(vuln, dict):
@@ -175,7 +241,9 @@ def parse_feed(data):
         for sw in software_list:
             if not isinstance(sw, dict):
                 continue
-            if sw.get('type') != 'plugin':
+
+            sw_type = sw.get('type', '')
+            if sw_type not in ('plugin', 'theme'):
                 continue
 
             slug = (sw.get('slug') or '').strip()
@@ -184,13 +252,11 @@ def parse_feed(data):
 
             # ── Find max vulnerable version ───────────────────────────────
             concrete_to_versions = []
-            has_wildcard = False
 
             for rng in (sw.get('affected_versions') or {}).values():
-                to_ver       = (rng.get('to_version') or '').strip()
-                to_inclusive = rng.get('to_inclusive', True)
+                to_ver = (rng.get('to_version') or '').strip()
                 if not to_ver or to_ver == '*':
-                    has_wildcard = True
+                    pass  # wildcard – no concrete upper bound
                 else:
                     concrete_to_versions.append(to_ver)
 
@@ -205,7 +271,6 @@ def parse_feed(data):
             cve_id    = (vuln.get('cve') or '').strip()
             cvss_data = vuln.get('cvss')
 
-            # v3: rating lives inside the cvss object as cvss.rating
             if isinstance(cvss_data, dict):
                 severity = (cvss_data.get('rating') or 'medium').upper()
             else:
@@ -224,12 +289,15 @@ def parse_feed(data):
                 skipped += 1
                 continue
 
-            desc = (vuln.get('title') or '')[:150].strip()
-
+            desc  = (vuln.get('title') or '')[:150].strip()
             entry = [max_vuln, cve_id, severity, cvss_score, desc]
-            db.setdefault(slug, []).append(entry)
 
-    return db, skipped
+            if sw_type == 'theme':
+                db_themes.setdefault(slug, []).append(entry)
+            else:
+                db_plugins.setdefault(slug, []).append(entry)
+
+    return db_plugins, db_themes, skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,27 +339,41 @@ def needs_update(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS):
 
 def run_db_update(path=DB_PATH, verbose=True):
     """
-    Fetch the Wordfence feed and save it to path.
+    Fetch the Wordfence feed + WordPress.org popular lists and save to path.
     Returns (ok: bool, message: str).
     """
-    import re as _re
-    global re
-    import re
-
+    # Fetch Wordfence CVE feed
     try:
         data = fetch_feed(timeout=90)
     except Exception as e:
         return False, f"Fetch failed: {e}"
 
+    # Fetch WordPress.org popular lists (best-effort; failures are non-fatal)
+    popular_plugins = []
+    popular_themes  = []
     try:
-        db, _ = parse_feed(data)
-        meta  = save_db(db, path=path)
+        if verbose:
+            print(f"  Fetching popular plugins from WordPress.org...", end=' ', flush=True)
+        popular_plugins = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+        popular_themes  = fetch_popular_wp_org('theme',  WP_ORG_POPULAR_THEMES_LIMIT)
+        if verbose:
+            print(f"done ({len(popular_plugins):,} plugins, {len(popular_themes):,} themes)", flush=True)
+    except Exception as e:
+        if verbose:
+            print(f"skipped ({e})", flush=True)
+
+    try:
+        db_plugins, db_themes, _ = parse_feed(data)
+        meta = save_db(db_plugins, db_themes=db_themes, path=path,
+                       popular_plugins=popular_plugins, popular_themes=popular_themes)
     except Exception as e:
         return False, f"Parse/save failed: {e}"
 
-    total = meta['entries']
+    total   = meta['entries']
     plugins = meta['plugins']
-    return True, f"{plugins:,} plugins, {total:,} CVE entries saved to {path}"
+    themes  = meta.get('themes', 0)
+    return True, (f"{plugins:,} plugins + {themes:,} themes, {total:,} CVE entries; "
+                  f"{len(popular_plugins):,} popular plugins cached")
 
 
 def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbose=True):
@@ -334,29 +416,54 @@ def auto_update_if_needed(path=DB_PATH, max_age_days=UPDATE_INTERVAL_DAYS, verbo
 # SAVE / LOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_db(db, path=DB_PATH, source_url=FEED_URL):
-    """Serialize db to JSON, adding a _meta block."""
-    total_entries = sum(len(v) for v in db.values())
-    payload = {
-        '_meta': {
-            'source':  source_url,
-            'updated': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-            'plugins': len(db),
-            'entries': total_entries,
-        }
+def save_db(db_plugins, db_themes=None, path=DB_PATH, source_url=FEED_URL,
+            popular_plugins=None, popular_themes=None):
+    """Serialize plugin/theme CVE databases and popular lists to JSON.
+
+    Layout of cve_db.json:
+      {
+        "_meta":   { source, updated, plugins, entries, themes, theme_entries,
+                     popular_plugins, popular_themes, popular_updated },
+        "_themes": { slug: [[max_vuln, cve_id, severity, cvss, desc], ...] },
+        "<plugin-slug>": [ ... ],
+        ...
+      }
+    """
+    db_themes = db_themes or {}
+    total_plugin_entries = sum(len(v) for v in db_plugins.values())
+    total_theme_entries  = sum(len(v) for v in db_themes.values())
+    now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    meta = {
+        'source':        source_url,
+        'updated':       now,
+        'plugins':       len(db_plugins),
+        'entries':       total_plugin_entries,
+        'themes':        len(db_themes),
+        'theme_entries': total_theme_entries,
     }
-    payload.update(db)
+    if popular_plugins is not None:
+        meta['popular_plugins']  = popular_plugins
+        meta['popular_themes']   = popular_themes or []
+        meta['popular_updated']  = now
+
+    payload = {'_meta': meta}
+    if db_themes:
+        payload['_themes'] = db_themes
+    payload.update(db_plugins)
+
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
-    return payload['_meta']
+    return meta
 
 
 def load_db(path=DB_PATH):
-    """Load cve_db.json and return (meta, db_dict)."""
+    """Load cve_db.json and return (meta, db_plugins, db_themes)."""
     with open(path, encoding='utf-8') as f:
         raw = json.load(f)
-    meta = raw.pop('_meta', {})
-    return meta, raw
+    meta      = raw.pop('_meta',   {})
+    db_themes = raw.pop('_themes', {})
+    return meta, raw, db_themes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,12 +471,6 @@ def load_db(path=DB_PATH):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    import re  # needed by _parse_ver inside parse_feed closure
-
-    # Re-import re at module level for parse_feed
-    global re
-    import re
-
     parser = argparse.ArgumentParser(
         description='Update WENDY CVE database from Wordfence Intelligence v3 feed'
     )
@@ -403,25 +504,38 @@ def main():
     print(f"  Received {len(data):,} entries")
 
     # Parse
-    db, skipped = parse_feed(data)
-    total = sum(len(v) for v in db.values())
-    print(f"  Parsed  {total:,} CVE entries for {len(db):,} plugins "
+    db_plugins, db_themes, skipped = parse_feed(data)
+    total_p = sum(len(v) for v in db_plugins.values())
+    total_t = sum(len(v) for v in db_themes.values())
+    print(f"  Parsed  {total_p:,} CVE entries for {len(db_plugins):,} plugins "
+          f"+ {total_t:,} entries for {len(db_themes):,} themes "
           f"({skipped:,} skipped - no concrete version cap)")
-    print()
 
     if args.dry_run:
-        print("Dry-run mode: skipping save.")
+        print("\nDry-run mode: skipping save and popular fetch.")
         return
 
+    # Fetch WordPress.org popular lists (best-effort)
+    print()
+    print(f"  Fetching popular plugins from WordPress.org...", end=' ', flush=True)
+    popular_plugins = fetch_popular_wp_org('plugin', WP_ORG_POPULAR_PLUGINS_LIMIT)
+    print(f"done ({len(popular_plugins):,})")
+    print(f"  Fetching popular themes  from WordPress.org...", end=' ', flush=True)
+    popular_themes = fetch_popular_wp_org('theme', WP_ORG_POPULAR_THEMES_LIMIT)
+    print(f"done ({len(popular_themes):,})")
+    print()
+
     # Save
-    meta = save_db(db, path=args.output)
+    meta = save_db(db_plugins, db_themes=db_themes, path=args.output,
+                   popular_plugins=popular_plugins, popular_themes=popular_themes)
     print(f"Saved to: {args.output}")
     print(f"Updated : {meta['updated']}")
-    print(f"Coverage: {meta['plugins']:,} plugins, {meta['entries']:,} CVE entries")
+    print(f"Plugins : {meta['plugins']:,} slugs, {meta['entries']:,} CVE entries")
+    print(f"Themes  : {meta['themes']:,} slugs, {meta['theme_entries']:,} CVE entries")
+    print(f"Popular : {len(popular_plugins):,} plugins, {len(popular_themes):,} themes cached")
     print()
     print("Run WENDY normally - it will automatically load the updated database.")
 
 
 if __name__ == '__main__':
-    import re
     main()

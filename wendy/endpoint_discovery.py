@@ -397,11 +397,8 @@ class EndpointDiscovery:
                 cmd += f" -H '{k}: {v_esc}'"
         return cmd
 
-    def generate_browser_command(self, url):
-        return f"xdg-open '{url}' 2>/dev/null || open '{url}'"
-
     def generate_download_command(self, url):
-        return f"curl -O '{url}'"
+        return f"curl -i -O '{url}'"
 
     def _section(self, n, total, title):
         print(f"\n{C.BOLD}[{n}/{total}] {title.upper()}{C.RESET}")
@@ -1336,8 +1333,6 @@ class EndpointDiscovery:
                 print(f"      │  Header: {k}: {v}")
         if self.verbosity >= 1:
             print(f"      │  Curl: {bypass['curl_command']}")
-            if not bypass.get('bypass_headers') and bypass.get('http_method','GET') == 'GET':
-                print(f"      │  Browser: {self.generate_browser_command(url)}")
         if self.verbosity >= 2 and bypass.get('preview'):
             preview = bypass['preview'][:80].replace('\n',' ').strip()
             print(f"      │  Preview: {preview}...")
@@ -1534,7 +1529,6 @@ class EndpointDiscovery:
                 'bypasses': [], 'verification': '',
                 'is_directory': is_directory, 'is_false_positive': False,
                 'curl_command': self.generate_curl_command(url),
-                'browser_command': self.generate_browser_command(url),
                 'download_command': None if is_directory else self.generate_download_command(url),
             }
 
@@ -1821,11 +1815,10 @@ class EndpointDiscovery:
                             print(f"     └─ Preview: {prev}...")
                         # Actions: only for non-403 and non-redirect, at verbosity >= 1
                         if status not in (301, 302, 403):
-                            if r.get('browser_command'):
-                                print(f"     └─ Browser : {r['browser_command']}")
                             if r.get('download_command') and not r.get('is_directory'):
                                 print(f"     └─ Download: {r['download_command']}")
-                            print(f"     └─ Curl    : {r['curl_command']}")
+                            else:
+                                print(f"     └─ Curl    : {r['curl_command']}")
                         if r.get('bypasses'):
                             verified_bp = [b for b in r['bypasses'] if not b.get('needs_verification')]
                             check_bp    = [b for b in r['bypasses'] if b.get('needs_verification')]

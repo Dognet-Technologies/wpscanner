@@ -1493,7 +1493,7 @@ class EndpointDiscovery:
 
         print(f"\n{C.BOLD}  Target :{C.RESET} {base_url}")
         print(f"{C.BOLD}  Mode   :{C.RESET} {'AGGRESSIVE' if self.aggressive else 'Normal'}"
-              f"  Verbosity: {'vv' if self.verbosity==2 else ('v' if self.verbosity==1 else '-')}")
+              f"  Verbosity: {['quiet', 'verbose', 'debug'][self.verbosity]}")
         if self.aggressive and os.environ.get('WPSCAN_API_TOKEN'):
             print(f"{C.BOLD}  WPScan :{C.RESET} API token found - extended CVE lookup enabled")
         elif self.aggressive:

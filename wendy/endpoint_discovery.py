@@ -389,14 +389,16 @@ class EndpointDiscovery:
 
         found = {}
         workers = 10 if self.aggressive else 5
-        import uuid, sys
+        import uuid
 
         # Establish baseline: probe a random non-existent plugin to detect
         # servers that return 403 globally (global deny rules).
         _canary = f"_canary-{uuid.uuid4().hex[:12]}"
+        print(f"    Detecting server baseline...", end=' ', flush=True)
         _canary_url = f"{base_url.rstrip('/')}/wp-content/plugins/{_canary}/readme.txt"
         _canary_r = self._safe_get(_canary_url, timeout=5)
         _baseline_status = _canary_r.status_code if _canary_r else 404
+        print(f"done (baseline={_baseline_status})", flush=True)
 
         def _extract_version_from_readme(text):
             m = re.search(r'[Ss]table\s+tag:\s*([\d.]+)', text)
@@ -430,8 +432,7 @@ class EndpointDiscovery:
 
         total = len(plugin_slugs)
         done = 0
-        sys.stdout.write(f"    Checking {total} plugins: 0/{total}")
-        sys.stdout.flush()
+        print(f"    Plugins [  0/{total}]", end='', flush=True)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(check_plugin, s): s for s in plugin_slugs}
             for fut in as_completed(futures):
@@ -439,15 +440,11 @@ class EndpointDiscovery:
                 slug, ver = fut.result()
                 if slug:
                     found[slug] = ver
-                    sys.stdout.write(f"\r    Checking {total} plugins: {done}/{total}  "
-                                     f"[found: {slug}{'  v'+ver if ver else ''}]  \n")
-                    sys.stdout.flush()
-                    sys.stdout.write(f"    Checking {total} plugins: {done}/{total}")
+                    print(f"\r    Plugins [{done:3}/{total}]  + {slug}"
+                          f"{'  v'+ver if ver else ''}", flush=True)
                 else:
-                    sys.stdout.write(f"\r    Checking {total} plugins: {done}/{total}  ")
-                sys.stdout.flush()
-        sys.stdout.write("\r" + " " * 60 + "\r")
-        sys.stdout.flush()
+                    print(f"\r    Plugins [{done:3}/{total}]", end='', flush=True)
+        print(flush=True)
 
         # Basic theme detection — use style.css which every theme must have
         theme_slugs_base = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
@@ -464,18 +461,16 @@ class EndpointDiscovery:
 
         themes_found = {}
         theme_total = len(theme_slugs_base)
+        print(f"    Themes  [  0/{theme_total}]", end='', flush=True)
         for i, slug in enumerate(theme_slugs_base, 1):
-            sys.stdout.write(f"\r    Checking {theme_total} themes: {i}/{theme_total}  ")
-            sys.stdout.flush()
             style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
             r = self._safe_get(style_url, timeout=5)
             if r and r.status_code == 200:
                 themes_found[slug] = None
-                sys.stdout.write(f"\r    Checking {theme_total} themes: {i}/{theme_total}  "
-                                 f"[found: {slug}]  \n")
-                sys.stdout.flush()
-        sys.stdout.write("\r" + " " * 60 + "\r")
-        sys.stdout.flush()
+                print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+            else:
+                print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
+        print(flush=True)
 
         return found, themes_found
 

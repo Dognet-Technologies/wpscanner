@@ -358,36 +358,80 @@ class EndpointDiscovery:
     def enumerate_plugins_themes(self, base_url):
         """
         Detect installed plugins and themes.
+        Strategy:
+          1. Parse homepage HTML for /wp-content/plugins|themes/{slug}/ references
+             (catches any plugin that loads frontend assets — very reliable)
+          2. Probe a curated hardcoded list via readme.txt (catches backend-only
+             plugins that load no frontend assets)
         Returns dict: {slug: version_or_None}
         """
-        plugin_slugs = [
+        # ── STEP 1: HTML source discovery ─────────────────────────────────────
+        print(f"    Parsing page source for asset references...", end=' ', flush=True)
+        html_plugins: dict = {}
+        html_themes:  dict = {}
+        for path in ['/', '/?p=1', '/feed/']:
+            r = self._safe_get(base_url.rstrip('/') + path, timeout=10)
+            if not r or r.status_code != 200:
+                continue
+            for m in re.finditer(
+                r'/wp-content/plugins/([a-z0-9_-]+)/', r.text, re.IGNORECASE
+            ):
+                slug = m.group(1).lower()
+                if slug not in html_plugins:
+                    html_plugins[slug] = None
+            for m in re.finditer(
+                r'/wp-content/themes/([a-z0-9_-]+)/', r.text, re.IGNORECASE
+            ):
+                slug = m.group(1).lower()
+                if slug not in html_themes:
+                    html_themes[slug] = None
+
+        # Fetch versions for HTML-discovered plugins
+        for slug in list(html_plugins.keys()):
+            html_plugins[slug] = self._get_plugin_version(base_url, slug)
+        print(f"found {len(html_plugins)} plugin(s), {len(html_themes)} theme(s)", flush=True)
+
+        # ── STEP 2: Probe hardcoded list (backend-only plugins) ───────────────
+        probe_slugs = [
             'royal-elementor-addons','elementor','elementor-pro','woocommerce','woocommerce-payments',
             'jetpack','contact-form-7','wp-file-manager','yoast-seo','all-in-one-seo-pack',
             'wordfence','ithemes-security','really-simple-ssl','sucuri-scanner',
             'wp-fastest-cache','litespeed-cache','w3-total-cache','wp-super-cache','wp-rocket',
-            'autoptimize','advanced-custom-fields','acf-pro','gravityforms','ninja-forms','wpforms',
-            'revslider','js_composer','tablepress','the-events-calendar',
+            'autoptimize','advanced-custom-fields','acf-pro','gravityforms','ninja-forms',
+            'wpforms','wpforms-lite','revslider','js_composer','tablepress','the-events-calendar',
             'duplicator','updraftplus','all-in-one-wp-migration','backupbuddy',
-            'wp-statistics','monsterinsights','complianz-gdpr','broken-link-checker',
+            'wp-statistics','google-analytics-for-wordpress','monsterinsights',
+            'complianz-gdpr','complianz','broken-link-checker',
             'loginizer','wps-hide-login','limit-login-attempts-reloaded',
             'ewww-image-optimizer','smush','redirection','wordpress-seo',
             'wp-mail-smtp','mailchimp-for-wp','query-monitor','wp-crontrol',
-            'mainwp','managewp-worker','wp-migrate-db','wp01','w3-total-cache',
+            'mainwp','managewp-worker','wp-migrate-db','wp01',
+            'rank-math-seo','rankmath','seo-by-rank-math',
+            'google-site-kit','wpscan','instant-indexing',
+            'wplingua','digital-license-manager','greenshift-animation-and-page-builder-blocks',
+            'site-add-on-watchdog',
         ]
+        # Skip slugs already discovered from HTML
+        probe_slugs = [s for s in probe_slugs if s not in html_plugins]
+        # Remove duplicates preserving order
+        seen = set()
+        probe_slugs = [s for s in probe_slugs if not (s in seen or seen.add(s))]
 
         if self.aggressive:
-            plugin_slugs += [
-                'akismet','classic-editor','gutenberg','beaver-builder-plugin',
-                'divi','avada','enfold','siteorigin-panels','cornerstone',
-                'popup-maker','convert-pro','sumo','optinmonster','hustle',
-                'wpcf7-recaptcha','invisible-recaptcha','hcaptcha-for-forms',
-                'buddypress','bbpress','lms-by-learndash','tutor',
-                'paid-memberships-pro','woocommerce-subscriptions',
-                'stripe-payments','woo-stripe-payment','paypal-for-woocommerce',
-                'wp-simple-firewall','anti-malware','clef',
+            probe_slugs += [
+                s for s in [
+                    'akismet','classic-editor','gutenberg','beaver-builder-plugin',
+                    'popup-maker','convert-pro','optinmonster','hustle',
+                    'buddypress','bbpress','lms-by-learndash','tutor',
+                    'paid-memberships-pro','woocommerce-subscriptions',
+                    'stripe-payments','woo-stripe-payment','paypal-for-woocommerce',
+                    'wp-simple-firewall','anti-malware',
+                ] if s not in html_plugins
             ]
 
-        found = {}
+        # Start with HTML-discovered plugins/themes as confirmed
+        found = dict(html_plugins)
+        themes_from_html = dict(html_themes)
         workers = 10 if self.aggressive else 5
         import uuid
 
@@ -437,55 +481,59 @@ class EndpointDiscovery:
                     return slug, ver
             return None, None
 
-        total = len(plugin_slugs)
+        total = len(probe_slugs)
         done = 0
-        print(f"    Plugins [  0/{total}]", end='', flush=True)
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(check_plugin, s): s for s in plugin_slugs}
-            for fut in as_completed(futures):
-                done += 1
-                slug, ver = fut.result()
-                if slug:
-                    found[slug] = ver
-                    print(f"\r    Plugins [{done:3}/{total}]  + {slug}"
-                          f"{'  v'+ver if ver else ''}", flush=True)
-                else:
-                    print(f"\r    Plugins [{done:3}/{total}]", end='', flush=True)
-        print(flush=True)
+        if total > 0:
+            print(f"    Probing {total} additional slugs...", end='', flush=True)
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(check_plugin, s): s for s in probe_slugs}
+                for fut in as_completed(futures):
+                    done += 1
+                    slug, ver = fut.result()
+                    if slug:
+                        found[slug] = ver
+                        print(f"\r    Probing [{done:3}/{total}]  + {slug}"
+                              f"{'  v'+ver if ver else ''}", flush=True)
+                    else:
+                        print(f"\r    Probing [{done:3}/{total}]", end='', flush=True)
+            print(flush=True)
 
-        # Basic theme detection — use style.css which every theme must have
-        theme_slugs_base = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
-                            'divi','avada','astra','hello-elementor','neve','generatepress',
-                            'flatsome','storefront','oceanwp','enfold','bridge','salient']
+        # ── Theme detection ─────────────────────────────────────────────────
+        # Start from HTML-discovered themes, then probe hardcoded list
+        theme_probe = ['twentytwentyfour','twentytwentythree','twentytwentytwo',
+                       'divi','avada','astra','hello-elementor','neve','generatepress',
+                       'flatsome','storefront','oceanwp','enfold','bridge','salient',
+                       'blocksy','kadence','generatepress']
         if self.aggressive:
-            theme_slugs_base += ['betheme','jupiter','woodmart','porto','electro',
-                                  'thrive-themes','kadence','blocksy']
+            theme_probe += ['betheme','jupiter','woodmart','porto','electro','thrive-themes']
+        theme_probe = [s for s in theme_probe if s not in themes_from_html]
+        seen_t = set()
+        theme_probe = [s for s in theme_probe if not (s in seen_t or seen_t.add(s))]
 
         # Baseline for themes
         _canary_theme_url = f"{base_url.rstrip('/')}/wp-content/themes/{_canary}/style.css"
         _canary_theme_r = self._safe_get(_canary_theme_url, timeout=5)
         _baseline_theme_status = _canary_theme_r.status_code if _canary_theme_r else 404
 
-        themes_found = {}
-        theme_total = len(theme_slugs_base)
-        print(f"    Themes  [  0/{theme_total}]", end='', flush=True)
-        for i, slug in enumerate(theme_slugs_base, 1):
-            style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
-            r = self._safe_get(style_url, timeout=5)
-            if r and r.status_code == 200:
-                content_type = r.headers.get('Content-Type', '')
-                # style.css is never HTML; HTML response = soft-404
-                if 'text/html' not in content_type:
-                    themes_found[slug] = None
-                    print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
-                    continue
-                elif _baseline_theme_status != 200:
-                    # Non-soft-404 server with odd content-type, still count it
-                    themes_found[slug] = None
-                    print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
-                    continue
-            print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
-        print(flush=True)
+        themes_found = dict(themes_from_html)
+        theme_total = len(theme_probe)
+        if theme_total > 0:
+            print(f"    Themes  [  0/{theme_total}]", end='', flush=True)
+            for i, slug in enumerate(theme_probe, 1):
+                style_url = f"{base_url.rstrip('/')}/wp-content/themes/{slug}/style.css"
+                r = self._safe_get(style_url, timeout=5)
+                if r and r.status_code == 200:
+                    content_type = r.headers.get('Content-Type', '')
+                    if 'text/html' not in content_type:
+                        themes_found[slug] = None
+                        print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+                        continue
+                    elif _baseline_theme_status != 200:
+                        themes_found[slug] = None
+                        print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+                        continue
+                print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
+            print(flush=True)
 
         return found, themes_found
 

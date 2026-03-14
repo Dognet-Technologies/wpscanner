@@ -404,17 +404,48 @@ class EndpointDiscovery:
         findings.sort(key=lambda x: x['cvss'], reverse=True)
         return findings
 
+    def _cvss_score_to_severity(self, score):
+        """Map a numeric CVSS score to a severity label."""
+        try:
+            s = float(score)
+        except (TypeError, ValueError):
+            return 'MEDIUM'
+        if s >= 9.0:
+            return 'CRITICAL'
+        if s >= 7.0:
+            return 'HIGH'
+        if s >= 4.0:
+            return 'MEDIUM'
+        if s > 0.0:
+            return 'LOW'
+        return 'INFO'
+
     def _query_wpscan_api(self, slug, slug_type='plugin'):
-        """Query WPScan API if WPSCAN_API_TOKEN env var is set."""
+        """
+        Query WPScan API (https://wpscan.com/api/v3/) for a plugin/theme.
+        Requires WPSCAN_API_TOKEN env var (free plan: 25 req/day).
+        Returns the inner plugin/theme dict, or None on failure.
+
+        Response structure:
+          { "<slug>": { "friendly_name": "...", "vulnerabilities": [...] } }
+        """
         token = os.environ.get('WPSCAN_API_TOKEN', '')
         if not token:
             return None
         try:
             url = f"https://wpscan.com/api/v3/{slug_type}s/{slug}"
             r = requests.get(url, headers={'Authorization': f'Token token={token}'},
-                             timeout=10, verify=True)
+                             timeout=15, verify=True)
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                # Top-level key is the slug itself
+                return data.get(slug)
+            if r.status_code == 404:
+                return None   # Plugin not in WPScan DB
+            if r.status_code == 401:
+                self.vprint(f"  {C.YELLOW}⚠ WPScan API: invalid token{C.RESET}", level=0)
+            elif r.status_code == 429:
+                self.vprint(f"  {C.YELLOW}⚠ WPScan API: rate limit reached (25 req/day on free plan){C.RESET}", level=0)
         except Exception:
             pass
         return None
@@ -477,17 +508,20 @@ class EndpointDiscovery:
                 r2 = self.session.get(url, headers=self.get_random_headers(),
                                       timeout=8, verify=False, allow_redirects=True)
                 if r2 and r2.status_code == 200:
-                    # Extract /author/<slug>/ from final URL
+                    # Check for redirect to /author/<slug>/ in the final URL
+                    redirected = r2.url.rstrip('/') != url.rstrip('/')
                     m = re.search(r'/author/([^/?#]+)', r2.url)
                     if m:
                         uname = m.group(1)
                         if i not in users:
                             users[i] = {'username': uname, 'method': 'Author archive', 'extra': ''}
-                    # Also grep page title
-                    m2 = re.search(r'<title[^>]*>([^<]+)</title>', r2.text, re.IGNORECASE)
-                    if m2 and i not in users:
-                        title = m2.group(1).strip()
-                        users[i] = {'username': title, 'method': 'Author page title', 'extra': ''}
+                    elif redirected:
+                        # Redirect happened but not to /author/ path - try page title
+                        # (only when redirect occurred, to avoid capturing the site homepage title)
+                        m2 = re.search(r'<title[^>]*>([^<]+)</title>', r2.text, re.IGNORECASE)
+                        if m2 and i not in users:
+                            title = m2.group(1).strip()
+                            users[i] = {'username': title, 'method': 'Author page title', 'extra': ''}
             except Exception:
                 pass
             time.sleep(random.uniform(0.3, 0.8))
@@ -1254,21 +1288,31 @@ class EndpointDiscovery:
 
         cve_findings = self.check_cve_vulnerabilities(plugins_found)
 
-        # Optional WPScan API in aggressive mode
+        # Optional WPScan API enrichment in aggressive mode
         if self.aggressive and os.environ.get('WPSCAN_API_TOKEN'):
+            # Track CVE IDs already in embedded findings to avoid duplicates
+            seen_cves = {f['cve'] for f in cve_findings}
             for slug in plugins_found:
                 api_data = self._query_wpscan_api(slug, 'plugin')
-                if api_data and 'vulnerabilities' in api_data:
-                    for vuln in api_data['vulnerabilities']:
-                        cve_id   = (vuln.get('references',{}).get('cve') or [''])[0]
-                        cvss_val = float(vuln.get('cvss',{}).get('score',0) or 0)
-                        cve_findings.append({
-                            'slug': slug, 'version': plugins_found[slug] or '?',
-                            'cve': f"CVE-{cve_id}" if cve_id else vuln.get('title',''),
-                            'severity': vuln.get('cvss',{}).get('vector','MEDIUM').split('/')[0],
-                            'cvss': cvss_val, 'desc': vuln.get('title',''),
-                            'certain': True, 'source': 'WPScan API',
-                        })
+                if not api_data:
+                    continue
+                for vuln in api_data.get('vulnerabilities', []):
+                    cvss_score = float(vuln.get('cvss', {}).get('score') or 0)
+                    cve_list   = vuln.get('references', {}).get('cve') or []
+                    cve_id     = f"CVE-{cve_list[0]}" if cve_list else vuln.get('title', '')
+                    if cve_id in seen_cves:
+                        continue   # Already reported from embedded DB
+                    seen_cves.add(cve_id)
+                    cve_findings.append({
+                        'slug':     slug,
+                        'version':  plugins_found[slug] or '?',
+                        'cve':      cve_id,
+                        'severity': self._cvss_score_to_severity(cvss_score),
+                        'cvss':     cvss_score,
+                        'desc':     vuln.get('title', ''),
+                        'certain':  True,
+                        'source':   'WPScan API',
+                    })
             cve_findings.sort(key=lambda x: x['cvss'], reverse=True)
 
         if cve_findings:
@@ -1289,10 +1333,6 @@ class EndpointDiscovery:
         if not header_findings:
             print(f"  {C.YELLOW}⚠{C.RESET} Could not fetch main page headers")
         else:
-            critical_missing = [h for h in header_findings if not h['present'] and h['critical']]
-            optional_missing = [h for h in header_findings if not h['present'] and not h['critical']]
-            ok_headers       = [h for h in header_findings if h['present']]
-
             for h in header_findings:
                 if h['present']:
                     val_str = f"  {C.DIM}{h['value'][:60]}{C.RESET}" if self.verbosity >= 1 else ''

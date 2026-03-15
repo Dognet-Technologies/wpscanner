@@ -2759,8 +2759,14 @@ class EndpointDiscovery:
 
         print(f"  Enumerating plugins/themes ...")
         plugins_found, themes_found = self.enumerate_plugins_themes(base_url)
+        theme_summary = (
+            '  ' + ', '.join(
+                f"{slug}{(' v'+ver) if ver else ''}"
+                for slug, ver in sorted(themes_found.items())
+            )
+        ) if themes_found else ''
         print(f"  {C.GREEN}✓{C.RESET} {len(plugins_found)} plugin(s) detected"
-              f"  {len(themes_found)} theme(s) detected")
+              f"  {len(themes_found)} theme(s) detected{theme_summary}")
 
         if self.verbosity >= 2:
             for slug, ver in sorted(plugins_found.items()):
@@ -3063,9 +3069,10 @@ class EndpointDiscovery:
                 f.get('desc',''),
             ))
         for h in (header_findings or []):
-            if not h['present'] and h['critical']:
+            if not h['present']:
+                sev = 'HIGH' if h['critical'] else 'LOW'
                 summary_findings.append((
-                    'MEDIUM',
+                    sev,
                     f"Missing header: {h['header']}",
                     h.get('risk',''),
                 ))

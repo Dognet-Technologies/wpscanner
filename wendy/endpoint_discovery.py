@@ -859,12 +859,31 @@ class EndpointDiscovery:
 
         # Method 1: REST API /wp-json/wp/v2/users (with pagination for >100 users)
         _rest_page = 1
+        _rest_ok = False
         while True:
             r = self._safe_get(
                 f"{base_url.rstrip('/')}/wp-json/wp/v2/users?per_page=100&page={_rest_page}"
             )
             if not r or r.status_code != 200:
+                # Diagnostic: distinguish WAF block (HTML) from WP restriction (JSON)
+                if r and r.status_code in (401, 403):
+                    ct = r.headers.get('Content-Type', '')
+                    if 'json' in ct:
+                        try:
+                            err = r.json()
+                            wp_code = err.get('code', 'unknown')
+                            self.vprint(
+                                f"    {C.DIM}REST /users: WP restriction ({r.status_code}, code={wp_code}) — "
+                                f"not WAF{C.RESET}", level=1)
+                        except Exception:
+                            self.vprint(
+                                f"    {C.DIM}REST /users: {r.status_code} JSON parse failed{C.RESET}", level=1)
+                    else:
+                        self.vprint(
+                            f"    {C.DIM}REST /users: {r.status_code} non-JSON response "
+                            f"({ct or 'no Content-Type'}) — likely WAF block{C.RESET}", level=1)
                 break
+            _rest_ok = True
             try:
                 data = r.json()
                 if not isinstance(data, list) or not data:
@@ -886,6 +905,32 @@ class EndpointDiscovery:
                 _rest_page += 1
             except Exception:
                 break
+
+        # Method 1b: REST API fallback via /?rest_route= (bypasses some WAF path rules)
+        if not _rest_ok:
+            r1b = self._safe_get(
+                f"{base_url.rstrip('/')}/?rest_route=/wp/v2/users&per_page=100"
+            )
+            if r1b and r1b.status_code == 200:
+                try:
+                    data1b = r1b.json()
+                    if isinstance(data1b, list):
+                        for u in data1b:
+                            if not isinstance(u, dict):
+                                continue
+                            uid  = u.get('id', '?')
+                            name = u.get('slug') or u.get('name') or ''
+                            if name and uid not in users:
+                                users[uid] = {'username': name, 'method': 'REST API (rest_route)',
+                                              'extra': u.get('name', '')}
+                        self.vprint(
+                            f"    {C.DIM}REST fallback /?rest_route= succeeded{C.RESET}", level=1)
+                except Exception:
+                    pass
+            else:
+                self.vprint(
+                    f"    {C.DIM}REST fallback /?rest_route= also blocked "
+                    f"({r1b.status_code if r1b else 'no response'}){C.RESET}", level=1)
 
         # Method 2: Author archives redirect /?author=N
         max_id = 20 if self.aggressive else 5
@@ -967,6 +1012,55 @@ class EndpointDiscovery:
                                                          'method': 'REST API comments', 'extra': ''}
             except Exception:
                 pass
+
+        # Method 6: WP native sitemap (WP 5.5+) and Yoast/plugin author sitemaps
+        # WAFs rarely block sitemaps; these often leak usernames even when REST is blocked.
+        sitemap_candidates = [
+            f"{base_url.rstrip('/')}/wp-sitemap-users-1.xml",  # WP 5.5+ core
+            f"{base_url.rstrip('/')}/author-sitemap.xml",       # Yoast SEO
+        ]
+        for sm_url in sitemap_candidates:
+            r6 = self._safe_get(sm_url)
+            if not r6 or r6.status_code != 200:
+                continue
+            if '<loc>' not in r6.text:
+                continue
+            found_any = False
+            for m in re.finditer(r'<loc>([^<]*/author/([^/<?\s]+)[^<]*)</loc>', r6.text):
+                uname = m.group(2)
+                if uname not in [v['username'] for v in users.values()]:
+                    users[f'sitemap_{uname}'] = {'username': uname,
+                                                  'method': 'WP Sitemap', 'extra': sm_url}
+                    found_any = True
+            if found_any:
+                self.vprint(f"    {C.DIM}Sitemap {sm_url} leaked usernames{C.RESET}", level=1)
+
+        # Method 7: Per-author RSS feed /?feed=rss2&author=N
+        # Useful when /?author=N is blocked by WAF but feed endpoint is not.
+        max_id = 20 if self.aggressive else 5
+        for i in range(1, max_id + 1):
+            feed_url = f"{base_url.rstrip('/')}/?feed=rss2&author={i}"
+            try:
+                r7 = self.session.get(feed_url, headers=self.get_random_headers(),
+                                      timeout=8, verify=False, allow_redirects=True)
+                if r7 and r7.status_code == 200 and '<rss' in r7.text:
+                    # Feed title or dc:creator leaks the author
+                    m7 = re.search(r'<title>([^<]+)</title>', r7.text)
+                    if m7:
+                        raw_title = m7.group(1).strip()
+                        # Typical WP feed title: "Site Name » Feeds for username"
+                        # or "Posts by username | Site Name"
+                        slug_m = re.search(r'/author/([^/<?\s]+)', r7.url)
+                        if slug_m:
+                            uname = slug_m.group(1)
+                        else:
+                            uname = raw_title
+                        if uname not in [v['username'] for v in users.values()]:
+                            users[f'rss_{i}'] = {'username': uname,
+                                                  'method': 'Author RSS feed', 'extra': f'author={i}'}
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.2, 0.5))
 
         return list(users.values())
 

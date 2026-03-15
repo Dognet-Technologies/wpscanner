@@ -1,6 +1,6 @@
 # WENDY – WordPress ENDpoint discoverY
 
-**v0.3.0** | Dognet Technologies srl | `info@dognet.tech`
+**v0.4.0** | Dognet Technologies srl | `info@dognet.tech`
 
 WENDY è uno scanner di sicurezza per WordPress che automatizza endpoint
 discovery, CVE matching, analisi security headers, user enumeration e
@@ -16,20 +16,30 @@ testing** e **bug bounty** su ambienti WordPress.
 ### Core (tutte le modalità)
 - **WordPress Detection** – versione, tema attivo, plugin attivi
 - **Plugin/Theme Discovery** – fino a 15 000+ plugin e temi da database CVE
-  live (Wordfence Intelligence); versione letta direttamente da `readme.txt`
+  live (Wordfence Intelligence); versione letta da `readme.txt` (plugin) e
+  `style.css` (temi)
 - **Smart Probing** – in modalità normale proba i top 3 000 slug ordinati per
   score di priorità (popolarità WP.org × CVE recenti × severità); modalità
   aggressive proba tutto il database
 - **CVE Matching** – confronto versione installata vs database vulnerabilità;
   riporta CVE ID, CVSS score, severità, descrizione; supporta plugin e temi
-- **Security Headers** – verifica HSTS, CSP, X-Frame-Options, Referrer-Policy
-  e altri 5 header; distingue CRITICAL vs OPTIONAL
-- **User Enumeration** – REST API `/wp-json/wp/v2/users`, author archives
-  `/?author=N`, RSS feed, login error differential
+- **Security Headers** – verifica presenza e valore di HSTS, CSP,
+  X-Frame-Options, Referrer-Policy e altri header; segnala configurazioni
+  deboli (CSP con `unsafe-inline`/`unsafe-eval`, HSTS `max-age` troppo corto)
+- **User Enumeration** – REST API `/wp-json/wp/v2/users` (con paginazione),
+  author archives `/?author=N`, RSS feed, commenti REST API, login error
+  differential
 - **XML-RPC** – verifica accesso, pingback (DDoS amplification), multicall
   (brute-force amplification)
 - **Hardening Checks** – `wp-config.php`, `.env`, `debug.log`, `readme.html`,
   `install.php`, `xmlrpc.php`, directory listing su `wp-content/uploads/`
+- **Advanced WordPress Checks** *(nuovi in v0.4.0)*:
+  - REST API namespace enumeration + `/wp-json/wp/v2/settings` leakage
+  - Verifica protezione `wp-admin/` (redirect a login vs accesso diretto)
+  - Rilevamento protezioni anti-brute-force su `wp-login.php`
+    (CAPTCHA, lockout, 2FA, rate-limit headers)
+  - Test esecuzione PHP in `wp-content/uploads/`
+  - Rilevamento `WP_DEBUG` attivo in produzione via errori REST API
 
 ### Aggressive mode (`--aggressive`)
 - User enumeration estesa (fino a 20 author ID; login error differential)
@@ -153,45 +163,74 @@ python wendy/endpoint_discovery.py https://example.com -u
 ### Output tipico
 
 ```
-══════════════════════════════════════════════════════════
-  WENDY v0.3.0 – WordPress Security Scanner
+════════════════════════════════════════════════════════════════════════
+  WENDY v0.4.0 – WordPress Security Scanner
   Target : https://example.com
   Mode   : aggressive | verbosity: 1
-══════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 
-[1/7] WordPress Detection
-  ✓ WordPress detected
-  ✓ Version: 6.4.3  (source: readme.html)
-  ✓ Theme: Astra
+[1/9] Fingerprinting
+  ✓ WordPress version: 6.4.3  (via readme.html)
+  ✓ 4 plugin(s) detected  1 theme(s) detected
 
-[2/7] Plugin & Theme Discovery
-  ✓ 4 plugin(s) detected
-  ✓ 1 theme(s) detected
-
-[3/7] CVE Analysis
+[2/9] CVE Analysis
   ⚠ CRITICAL contact-form-7 v5.2.0
      CVE-2020-35489  CVSS 9.8  Unrestricted file upload allows uploading PHP shells
   ⚠ HIGH    elementor v3.4.0
      CVE-2022-1329   CVSS 9.9  Contributor+ RCE via template import functionality
 
-[4/7] Security Headers
+[3/9] Security Headers
   ✗ Strict-Transport-Security         [CRITICAL]  HSTS missing
-  ✗ Content-Security-Policy           [CRITICAL]  No CSP - XSS mitigation severely weakened
+  ⚠ Content-Security-Policy           unsafe-inline present
+     └─ CSP weakened by: 'unsafe-inline'
   ✓ X-Content-Type-Options
 
-[5/7] User Enumeration
-  ⚠ 2 user(s) enumerated:
+[4/9] User Enumeration
+  ⚠ 3 user(s) enumerated:
      • admin      [REST API]
      • john.doe   [Author archive]
+     • Jane       [REST API comments]
 
-[6/7] XML-RPC
+[5/9] XML-RPC
   ⚠ xmlrpc.php accessible
   ⚠ Pingback enabled (DDoS amplification risk)
 
-[7/7] Hardening Checks
+[6/9] Hardening Checks
   ⚠ readme.html publicly accessible (WordPress version disclosure)
   ✓ wp-config.php not accessible
+
+[7/9] Advanced WordPress Checks
+  ✓ REST API: 3 namespaces found (wp/v2, oembed/1.0, woocommerce/v3)
+  ✓ wp-admin: properly redirects unauthenticated requests
+  ⚠ MEDIUM  No brute force protection detected on wp-login.php
+  ✓ uploads/: PHP execution appears blocked
+  ✓ WP_DEBUG: no debug output detected
+
+[8/9] Endpoint Discovery
+  ✓ /mysql.sql → 403 Real 403 (protected) [VERIFIED]
+  ✓ /database_backup.sql → 403 Real 403 + 5 bypasses [VERIFIED] [5 BYPASSES]
+  ✓ /.htaccess.old → 403 Real 403 (protected) [UNVERIFIED]
+
+[9/9] Security Report Summary
+  ...
 ```
+
+### Sigle nell'Endpoint Discovery
+
+Durante la fase di Endpoint Discovery ogni risultato 403 viene annotato con
+una o più sigle che descrivono lo stato della verifica e l'esito dei bypass:
+
+| Sigla | Colore | Significato |
+|---|---|---|
+| `[VERIFIED]` | verde | Il 403 è **genuino e specifico**. WENDY ha confermato che un URL casuale simile (`/mysql.sql-a7f3kx9`) restituisce 404 → il server protegge quel file in modo mirato |
+| `[UNVERIFIED]` | giallo | Il 403 è **probabilmente reale** ma non è stato possibile confermarlo (errore di rete o risposta anomala durante la verifica). Richiede verifica manuale |
+| `[FP]` | giallo | Il 403 è un **falso positivo**: anche un URL inventato dallo stesso percorso restituisce 403 → il server blocca tutto con 403 indiscriminatamente (WAF/regola globale). Il file potrebbe non esistere |
+| `(protected)` | testo normale | 403 reale, bypass tentati ma **nessuno ha funzionato**. Il file è correttamente protetto |
+| `[N BYPASSES]` | rosso | 403 reale, ma **N tecniche di bypass hanno restituito 200**. Il file è teoricamente raggiungibile aggirando il blocco. Il numero indica quante tecniche distinte hanno avuto successo |
+
+Le sigle sono **combinabili**: un endpoint può mostrare `[VERIFIED] [5 BYPASSES]`
+(verificato autentico, con 5 bypass funzionanti) oppure `[UNVERIFIED] [2 BYPASSES]`
+(bypass trovati ma verifica inconclusiva — possibile falso positivo).
 
 ---
 
@@ -266,6 +305,36 @@ Gli autori declinano ogni responsabilità per usi impropri.
 ---
 
 ## Changelog
+
+### v0.4.0
+- **Fix: versioni temi sempre `None`** — estratta `Version:` dall'header CSS di
+  `style.css`; il CVE matching per temi ora funziona correttamente
+- **Fix: sigla `[UNVERIFIED]`** — endpoint 403 con verifica inconclusiva
+  (errore rete/timeout) ora mostrano `[UNVERIFIED]` in giallo invece di nessuna
+  sigla; `[VERIFIED]` rimane verde, `[FP]` rimane giallo
+- **Security Headers: validazione valori** — oltre alla presenza, WENDY verifica
+  il contenuto degli header critici: CSP con `unsafe-inline`/`unsafe-eval`/
+  wildcard, HSTS con `max-age` < 31536000, X-Frame-Options non riconosciuto,
+  X-Content-Type-Options diverso da `nosniff`. Header presenti ma deboli
+  mostrano `⚠` giallo con descrizione del problema
+- **User Enumeration: paginazione REST + commenti** — gestione corretta di siti
+  con >100 utenti tramite `X-WP-TotalPages`; nuova Method 5 che enumera autori
+  via `/wp-json/wp/v2/comments`
+- **Nuova Phase 7 – Advanced WordPress Checks** (5 nuovi check dedicati):
+  - `check_rest_api()` — enumera namespace REST, segnala namespace custom di
+    plugin, verifica `/wp-json/wp/v2/settings` per leakage unauthenticated
+  - `check_wpadmin_protection()` — verifica che `wp-admin/` e
+    `wp-admin/index.php` redirigano correttamente al login; 200 senza redirect
+    è HIGH
+  - `check_login_protection()` — rileva CAPTCHA, account lockout, 2FA e
+    rate-limit headers su `wp-login.php`; assenza di tutte le protezioni
+    è MEDIUM
+  - `check_uploads_php_execution()` — proba un `.php` inesistente in
+    `wp-content/uploads/`; 200 = PHP execution non bloccata (HIGH)
+  - `check_wp_debug()` — triggera errori REST API e analizza la risposta per
+    segnali di `WP_DEBUG=true` attivo in produzione
+- **TOTAL_PHASES** aggiornato da 8 a 9
+- **README**: sezione "Sigle nell'Endpoint Discovery" aggiunta
 
 ### v0.3.0
 - **Smart probe prioritization**: in normal mode proba i top 3 000 plugin/temi

@@ -49,7 +49,7 @@ WENDY usa **tre livelli** di database vulnerabilità:
 | **WPScan API** | wpscan.com/api/v3 | Real-time (aggressive mode) | Token gratuito |
 
 ### Wordfence Intelligence v3 (feed live)
-Il feed `cve_db.json` è generato da `wendy/update_db.py` che scarica da
+Il feed `cve_db.json` scarica da
 `https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production/`
 e richiede una **API key gratuita** di Wordfence.
 
@@ -67,19 +67,17 @@ cp wendy/.keys.example wendy/.keys
 echo "WORDFENCE_API_KEY=your_key_here" >> wendy/.keys
 
 # 3. Aggiorna il database
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 **Aggiornamento settimanale consigliato:**
 ```bash
-python -m wendy.update_db
-# oppure
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 Cron settimanale (es. ogni martedì alle 07:00):
 ```cron
-0 7 * * 2  cd /path/to/wpscanner && python wendy/update_db.py >> /var/log/wendy-db.log 2>&1
+0 7 * * 2  cd /path/to/wpscanner && python wendy/endpoint_discovery.py -u >> /var/log/wendy-db.log 2>&1
 ```
 
 Il file `cve_db.json` è gitignored — va rigenerato localmente dopo ogni clone.
@@ -107,7 +105,7 @@ cd wpscanner
 pip install requests
 
 # (Opzionale ma raccomandato) Aggiorna il database CVE live
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 Nessun altro package richiesto. WENDY funziona offline anche senza `cve_db.json`
@@ -124,6 +122,8 @@ Argomenti:
   URL                   URL base del sito WordPress (es. https://example.com)
 
 Opzioni:
+  -u, --update          Aggiorna WENDY (git pull) e il CVE database, poi esce
+                        (se combinato con URL, aggiorna prima poi scansiona)
   -v                    Verboso: mostra endpoint testati, plugin non trovati, ecc.
   -vv                   Molto verboso: include dettagli di ogni request
   --aggressive          Modalità estesa: più plugin/temi, user enum completa,
@@ -143,8 +143,11 @@ python wendy/endpoint_discovery.py https://example.com -v
 export WPSCAN_API_TOKEN="tok_xxxxxxxxxxxx"
 python wendy/endpoint_discovery.py https://example.com --aggressive -v
 
-# Dry-run aggiornamento DB (fetch senza salvare)
-python wendy/update_db.py --dry-run
+# Solo aggiornamento DB (poi esce)
+python wendy/endpoint_discovery.py -u
+
+# Aggiorna DB e scansiona in un solo comando
+python wendy/endpoint_discovery.py https://example.com -u
 ```
 
 ### Output tipico
@@ -214,7 +217,7 @@ wpscanner/
 ```
 
 File generati localmente (gitignored):
-- `wendy/cve_db.json` – database CVE live + indice installs (generato da `update_db.py`)
+- `wendy/cve_db.json` – database CVE live + indice installs (generato con `-u`)
 - `wendy/.keys` – configurazione API key e probe tuning
 
 ---
@@ -264,27 +267,22 @@ Gli autori declinano ogni responsabilità per usi impropri.
 
 ## Changelog
 
-### v0.4.0
+### v0.3.0
 - **Smart probe prioritization**: in normal mode proba i top 3 000 plugin/temi
   ordinati per score (popolarità WP.org × CVE recenti × severità CVSS)
 - **WordPress.org installs index**: durante `-u` vengono scaricati in parallelo
   i top 10 000 plugin e 500 temi per `active_installs`; memorizzati in `cve_db.json`
 - **Filtro installazioni configurabile** (`MIN_ACTIVE_INSTALLS`): esclude plugin
   troppo rari in normal mode; plugin con CVE CRITICAL recenti sono sempre inclusi
-- **Theme CVE DB**: `parse_feed()` ora include anche le vulnerabilità dei temi
-  (tipo `theme` nel feed Wordfence); lista temi probe ora dinamica (CVE + popular + baseline)
+- **Theme CVE DB**: include anche le vulnerabilità dei temi (tipo `theme` nel feed
+  Wordfence); lista temi probe ora dinamica (CVE + popular + baseline)
 - **Probe tuning via `.keys`**: tutti i limiti configurabili senza modificare il codice
   (`PROBE_NORMAL_LIMIT`, `PROBE_THEME_LIMIT`, `CVE_YEARS`, `INSTALLS_INDEX_LIMIT`)
-- **Upgrade feed Wordfence**: da v2 (pubblico, no auth) a v3 (richiede API key gratuita)
+- **Aggiornamento DB integrato** (`-u`): aggiorna CVE database e indice installazioni
+  direttamente dallo scanner; nessun script separato da eseguire manualmente
+- **Feed Wordfence v3**: richiede API key gratuita (precedentemente v2 pubblica)
 - **`config.py`**: nuovo modulo `load_probe_config()` — legge e valida i parametri
   di tuning da `.keys` / env con defaults sensati
-- **Fix code quality**: eliminato doppio lookup `INSTALLS_INDEX`, regex pre-compilata
-  (`RECENT_CVE_IDS` frozenset), set creati una sola volta nel theme probe,
-  deduplication con `dict.fromkeys`, rimosso try/except ridondante in `run_db_update`
-
-### v0.3.0
-- Aggiunto `wendy/update_db.py`: aggiornamento settimanale CVE da Wordfence
-  Intelligence v2 (pubblico, no auth)
 - Database CVE a due livelli: embedded (fallback offline) + `cve_db.json` (live)
 - Merge intelligente: deduplicazione per CVE ID, embedded ha priorità sul live
 - Fix: WPScan API response parsing (chiave top-level = slug del plugin)

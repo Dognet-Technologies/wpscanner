@@ -200,11 +200,12 @@ python wendy/endpoint_discovery.py https://example.com -u
   ✓ wp-config.php not accessible
 
 [7/9] Advanced WordPress Checks
-  ✓ REST API: 3 namespaces found (wp/v2, oembed/1.0, woocommerce/v3)
-  ✓ wp-admin: properly redirects unauthenticated requests
+  ✓ INFO   REST API exposes 3 namespace(s)
+  ✓ INFO   Custom REST API namespace(s) detected: woocommerce/v3
+  ✓ wp-admin: properly protected (redirect or server-level block)
   ⚠ MEDIUM  No brute force protection detected on wp-login.php
   ✓ uploads/: PHP execution appears blocked
-  ✓ WP_DEBUG: no debug output detected
+  ✓ WP_DEBUG: no debug output detected in REST API responses
 
 [8/9] Endpoint Discovery
   ✓ /mysql.sql → 403 Real 403 (protected) [VERIFIED]
@@ -316,25 +317,35 @@ Gli autori declinano ogni responsabilità per usi impropri.
   il contenuto degli header critici: CSP con `unsafe-inline`/`unsafe-eval`/
   wildcard, HSTS con `max-age` < 31536000, X-Frame-Options non riconosciuto,
   X-Content-Type-Options diverso da `nosniff`. Header presenti ma deboli
-  mostrano `⚠` giallo con descrizione del problema
+  mostrano `⚠` giallo con descrizione inline del problema
 - **User Enumeration: paginazione REST + commenti** — gestione corretta di siti
   con >100 utenti tramite `X-WP-TotalPages`; nuova Method 5 che enumera autori
   via `/wp-json/wp/v2/comments`
 - **Nuova Phase 7 – Advanced WordPress Checks** (5 nuovi check dedicati):
   - `check_rest_api()` — enumera namespace REST, segnala namespace custom di
-    plugin, verifica `/wp-json/wp/v2/settings` per leakage unauthenticated
-  - `check_wpadmin_protection()` — verifica che `wp-admin/` e
-    `wp-admin/index.php` redirigano correttamente al login; 200 senza redirect
-    è HIGH
-  - `check_login_protection()` — rileva CAPTCHA, account lockout, 2FA e
-    rate-limit headers su `wp-login.php`; assenza di tutte le protezioni
-    è MEDIUM
+    plugin/tema, verifica `/wp-json/wp/v2/settings` per leakage unauthenticated
+    (MEDIUM)
+  - `check_wpadmin_protection()` — analizza la risposta a `wp-admin/` senza
+    seguire redirect: 301/302 verso wp-login è corretto; 200 con pannello aperto
+    è HIGH; 200 con login inline è INFO; 403/401 è hardening server (nessun
+    finding); redirect verso URL inaspettato è MEDIUM
+  - `check_login_protection()` — POST con credenziali errate (×2) su
+    `wp-login.php`; rileva CAPTCHA, lockout/throttle, 2FA, rate-limit headers
+    (tutti INFO); 403/401 a livello server è INFO positivo; assenza di qualsiasi
+    protezione è MEDIUM. Lockout verificato su entrambe le risposte (prima era
+    solo sulla prima)
   - `check_uploads_php_execution()` — proba un `.php` inesistente in
-    `wp-content/uploads/`; 200 = PHP execution non bloccata (HIGH)
-  - `check_wp_debug()` — triggera errori REST API e analizza la risposta per
-    segnali di `WP_DEBUG=true` attivo in produzione
+    `wp-content/uploads/`; 200 = PHP execution non bloccata (HIGH); 403 =
+    hardened correttamente; 404 = normale (nessun finding)
+  - `check_wp_debug()` — triggera un 404 REST su post inesistente e analizza la
+    risposta; usa due tier: strong signals (prefissi PHP esatti come
+    `<b>fatal error</b>`, `php notice:`) + regex stack trace
+    (`path.php on line N`) per evitare falsi positivi
+- **`_print_findings()`: icone per severità** — ⚠ rossa per HIGH/CRITICAL, ⚠
+  gialla per MEDIUM/LOW, ✓ verde per INFO
 - **TOTAL_PHASES** aggiornato da 8 a 9
-- **README**: sezione "Sigle nell'Endpoint Discovery" aggiunta
+- **README**: sezione "Sigle nell'Endpoint Discovery"; help CLI aggiornato con
+  legenda sigle nell'epilog
 
 ### v0.3.0
 - **Smart probe prioritization**: in normal mode proba i top 3 000 plugin/temi

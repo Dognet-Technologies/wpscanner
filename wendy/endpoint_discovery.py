@@ -1145,7 +1145,7 @@ class EndpointDiscovery:
         self.get_homepage_signature(base_url)
 
         for path, bad_cond, severity, title, desc in checks:
-            r = self._safe_get(base_url.rstrip('/') + path)
+            r = self._safe_get(base_url.rstrip('/') + path, allow_redirects=False)
             if r:
                 try:
                     if bad_cond(r) and not self._matches_homepage(r, base_url):
@@ -1260,14 +1260,18 @@ class EndpointDiscovery:
                             'url': f"{base}{path}",
                         })
                     else:
-                        # 200 with no login form at all — admin panel open
-                        findings.append({
-                            'severity': 'HIGH',
-                            'title': f'{label} accessible without authentication',
-                            'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
-                                     f'and body shows no login form — admin panel may be exposed'),
-                            'url': f"{base}{path}",
-                        })
+                        # 200 with no login form — but exclude WAF interception pages and
+                        # soft-redirect to homepage (some WAFs return HTTP 200 with a block
+                        # page body instead of a proper 403/redirect).
+                        is_waf, _ = self._is_waf_interception(r)
+                        if not is_waf and not self._matches_homepage(r, base_url):
+                            findings.append({
+                                'severity': 'HIGH',
+                                'title': f'{label} accessible without authentication',
+                                'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
+                                         f'and body shows no login form — admin panel may be exposed'),
+                                'url': f"{base}{path}",
+                            })
                 # 403/401 = server-level block, even more hardened than default — no finding
             except Exception:
                 pass
@@ -1393,7 +1397,7 @@ class EndpointDiscovery:
         probe_name = f"wendy-probe-{random.randint(10000,99999)}.php"
         probe_url  = f"{base_url.rstrip('/')}/wp-content/uploads/{probe_name}"
         try:
-            r = self._safe_get(probe_url, timeout=8)
+            r = self._safe_get(probe_url, timeout=8, allow_redirects=False)
             if r:
                 if r.status_code == 200:
                     # A 200 for a non-existent .php file in uploads means the server

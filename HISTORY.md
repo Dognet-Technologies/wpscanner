@@ -433,6 +433,106 @@ negligible. Memory: `response.text[:4000]` is always already buffered.
 
 ---
 
+---
+
+## 2026-03 — v0.4.0 (post-release): User enumeration — WAF diagnostic, fallback methods, RSS false positive fix
+
+### Decision: WAF diagnostic verbosity in Method 1 (REST /wp-json/wp/v2/users)
+**Why (bug fix + UX):** When the REST API returned a non-200 response, the
+original code silently broke the loop with no indication of why. On sites
+protected by a WAF (e.g. Incapsula/OpenResty), the operator had no way to
+distinguish a WAF hard block from a WordPress restriction.
+
+Added verbose diagnostic that distinguishes:
+- No response at all (timeout/connection reset) → WAF hard block
+- 401/403 with JSON body → WordPress restriction (`rest_user_cannot_view`)
+- 401/403 with HTML body → WAF or proxy block (non-JSON = not WP)
+
+**Tradeoff:** Diagnostic is printed only at `-v` (verbosity ≥ 1). Silent
+in default mode to avoid noise on clean sites.
+
+---
+
+### Decision: REST fallback via `/?rest_route=` (Method 1b)
+**Why:** Some WAFs apply path-based rules and block `/wp-json/` by URL prefix
+while leaving `/?rest_route=` reachable (it is the pre-permalink-enabled
+equivalent of the REST API path). This is a documented WAF misconfiguration.
+
+Method 1b runs only when Method 1 failed (`_rest_ok = False`). It is
+not a bypass of WP authentication — if WP itself restricts the endpoint,
+the fallback also returns 401/403. It only helps when the WAF blocks by
+URL pattern rather than by WordPress-level access control.
+
+**Alternatives considered:**
+| Option | Reason rejected |
+|---|---|
+| Always run both paths | Doubles requests on clean sites; Method 1 is authoritative when it works |
+| Run 1b first | Method 1 is the canonical REST path; 1b is a fallback, not preferred |
+
+---
+
+### Decision: Method 7 (per-author RSS feed) — redirect-only slug extraction
+**Why (bug fix):** Initial implementation extracted the username from
+`<title>` of `/?feed=rss2&author=N` when no redirect occurred. WordPress
+returns the main site feed (status 200, `<rss>` present) for non-existent
+author IDs, making the title "Site Name" — which was being added as a
+false username.
+
+The only reliable signal is whether WordPress redirected the request to
+`/author/<slug>/feed/`. If it did, `r.url` contains `/author/<slug>/` and
+we extract the slug. If it didn't redirect, we skip — there is no safe
+way to extract a username without risking a false positive.
+
+**Accepted tradeoff:** Method 7 only fires on WP configurations that
+redirect `/?feed=rss2&author=N` to the per-author feed URL. Configurations
+that serve the per-author feed at the original URL without redirecting
+are not covered. This is a minority case; Methods 1, 2, 3 handle those sites.
+
+---
+
+## 2026-03 — v0.4.0 (post-release): UI/output fixes
+
+### Decision: Theme name shown inline in Phase 1 summary
+**Why (bug fix):** Themes detected via HTML asset parsing were added to
+`themes_from_html` and excluded from the probe loop. The probe loop prints
+`+ slug v1.x` only for themes it discovers during probing. HTML-detected
+themes never passed through the loop and therefore never appeared in output
+beyond the bare count `N theme(s) detected`.
+
+Fix: construct a comma-separated slug+version string from `themes_found`
+and append it to the Phase 1 count line. Consistent with how plugin versions
+are exposed during probing.
+
+**Alternatives considered:**
+| Option | Reason rejected |
+|---|---|
+| Print HTML-detected themes through the probe-loop print path | Loop is designed for probe results; mixing HTML detections would confuse progress display |
+| Show names only at `-vv` | The count alone is useless without the name; the name should always be visible |
+
+---
+
+### Decision: Security header severity in Summary — HIGH for critical, LOW for optional
+**Why (bug fix):** `check_security_headers` classifies each header as
+`critical=True` (must-have: HSTS, X-Frame-Options, X-Content-Type-Options,
+CSP) or `critical=False` (optional: Referrer-Policy, CORS headers, etc.).
+Phase 3 output correctly reflects this with `[CRITICAL]` / `[OPTIONAL]`
+labels. The Security Report Summary was hardcoding `'MEDIUM'` for all
+missing critical headers and silently dropping missing optional ones.
+
+Fix:
+- `critical=True` + missing → `'HIGH'` in summary (not `'MEDIUM'`)
+- `critical=False` + missing → `'LOW'` in summary (previously invisible)
+
+`'HIGH'` is intentionally one level below `'CRITICAL'`: missing a security
+header is a significant hardening gap but does not represent an immediately
+exploitable vulnerability the way a CVSS 9+ CVE does.
+
+**Tradeoff:** Optional headers now appear in the summary at `[LOW]`. This
+increases the finding count. Accepted — the operator should be aware of
+optional headers too, and `[LOW]` correctly signals their non-urgency.
+
+---
+
 ## Future decision log template
 
 ```

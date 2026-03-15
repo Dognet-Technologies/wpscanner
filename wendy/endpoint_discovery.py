@@ -702,7 +702,7 @@ class EndpointDiscovery:
                     if 'text/html' not in content_type or _baseline_theme_status != 200:
                         # Extract version from style.css comment header (WordPress standard)
                         ver_match = re.search(
-                            r'^Version:\s*([0-9][0-9A-Za-z.\-+]*)',
+                            r'^Version:\s*v?([0-9][0-9A-Za-z.\-+]*)',
                             r.text, re.MULTILINE | re.IGNORECASE
                         )
                         theme_ver = ver_match.group(1).strip() if ver_match else None
@@ -870,12 +870,17 @@ class EndpointDiscovery:
                 if not isinstance(data, list) or not data:
                     break
                 for u in data:
+                    if not isinstance(u, dict):
+                        continue
                     uid  = u.get('id', '?')
                     name = u.get('slug') or u.get('name') or u.get('link', '')
                     if name:
                         users[uid] = {'username': name, 'method': 'REST API', 'extra': u.get('name','')}
                 # WordPress returns X-WP-TotalPages header; stop if no more pages
-                total_pages = int(r.headers.get('X-WP-TotalPages', 1))
+                try:
+                    total_pages = int(r.headers.get('X-WP-TotalPages', 1) or 1)
+                except (ValueError, TypeError):
+                    total_pages = 1
                 if _rest_page >= total_pages or len(data) < 100:
                     break
                 _rest_page += 1

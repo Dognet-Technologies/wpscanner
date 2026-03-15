@@ -866,7 +866,11 @@ class EndpointDiscovery:
             )
             if not r or r.status_code != 200:
                 # Diagnostic: distinguish WAF block (HTML) from WP restriction (JSON)
-                if r and r.status_code in (401, 403):
+                if not r:
+                    self.vprint(
+                        f"    {C.DIM}REST /users: no response (timeout or connection reset "
+                        f"— WAF hard block){C.RESET}", level=1)
+                elif r.status_code in (401, 403):
                     ct = r.headers.get('Content-Type', '')
                     if 'json' in ct:
                         try:
@@ -1044,17 +1048,13 @@ class EndpointDiscovery:
                 r7 = self.session.get(feed_url, headers=self.get_random_headers(),
                                       timeout=8, verify=False, allow_redirects=True)
                 if r7 and r7.status_code == 200 and '<rss' in r7.text:
-                    # Feed title or dc:creator leaks the author
-                    m7 = re.search(r'<title>([^<]+)</title>', r7.text)
-                    if m7:
-                        raw_title = m7.group(1).strip()
-                        # Typical WP feed title: "Site Name » Feeds for username"
-                        # or "Posts by username | Site Name"
-                        slug_m = re.search(r'/author/([^/<?\s]+)', r7.url)
-                        if slug_m:
-                            uname = slug_m.group(1)
-                        else:
-                            uname = raw_title
+                    # Only trust the author slug if WP redirected to /author/<slug>/feed/
+                    # When no redirect occurs r7.url still contains /?feed=rss2&author=N
+                    # which is the main site feed — using its <title> would add the
+                    # site name as a false username.
+                    slug_m = re.search(r'/author/([^/<?\s]+)', r7.url)
+                    if slug_m:
+                        uname = slug_m.group(1)
                         if uname not in [v['username'] for v in users.values()]:
                             users[f'rss_{i}'] = {'username': uname,
                                                   'method': 'Author RSS feed', 'extra': f'author={i}'}

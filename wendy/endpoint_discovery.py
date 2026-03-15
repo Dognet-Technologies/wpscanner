@@ -1274,10 +1274,9 @@ class EndpointDiscovery:
                 return True, f"Complex HTML page (score {complexity})", "high"
             cms_ind = [
                 'wordpress','wp-content','wp-includes','wp-json',
-                'jquery','bootstrap','react','angular','vue','svelte',
+                'wp-login','wp-admin','wp-emoji','wp-block',
                 'elementor','woocommerce','jetpack','yoast',
-                'drupal','joomla','magento','shopify','prestashop',
-                'laravel','symfony','django','rails',
+                'seo-by-rank-math','contact-form-7','akismet',
             ]
             if any(i in content_lower for i in cms_ind) and 'index of' not in content_lower:
                 return True, "CMS/Framework content, not a directory listing", "high"

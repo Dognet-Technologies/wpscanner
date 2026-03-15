@@ -397,42 +397,6 @@ class EndpointDiscovery:
                 cmd += f" -H '{k}: {v_esc}'"
         return cmd
 
-    def generate_browser_command(self, url):
-        """Generate command to open URL in browser"""
-        # xdg-open works on Linux, open works on macOS
-        return f"xdg-open '{url}' 2>/dev/null || open '{url}'"
-
-    def _print_bypass_details(self, bypass, show_warning=False):
-        """Print formatted bypass details"""
-        method = bypass['method']
-        url = bypass['url']
-        has_custom_headers = bypass.get('bypass_headers')
-        http_method = bypass.get('http_method', 'GET')
-
-        # Show warning indicator if needed
-        warning = " ⚠️" if show_warning else ""
-        print(f"      ├─ {method}{warning}")
-
-        if show_warning and bypass.get('fp_reason'):
-            print(f"      │  ⚠️  Warning: {bypass['fp_reason']}")
-
-        if has_custom_headers:
-            for k, v in has_custom_headers.items():
-                print(f"      │  Header: {k}: {v}")
-
-        print(f"      │  Curl: {bypass['curl_command']}")
-
-        # Download and Browser only for GET requests without custom headers
-        if not has_custom_headers and http_method == 'GET':
-            print(f"      │  Download: {self.generate_download_command(url)}")
-            print(f"      │  Browser: {self.generate_browser_command(url)}")
-
-        if bypass.get('preview'):
-            bp_preview = bypass['preview'][:60].replace('\n', ' ').strip()
-            print(f"      │  Preview: {bp_preview}...")
-
-        print(f"      │")
-
     def generate_download_command(self, url):
         return f"curl -i -O '{url}'"
 
@@ -1869,90 +1833,6 @@ class EndpointDiscovery:
                                 for bp in check_bp:
                                     self._print_bypass_details(bp, show_warning=True)
 
-                    # Print endpoint header
-                    icon = "📁" if is_dir else "📄"
-                    print(f"\n{icon} {endpoint}")
-                    print(f"   └─ {reason}")
-
-                    # Skip manual test commands for redirects
-                    if result['status_code'] in (301, 302):
-                        continue
-
-                    # Show verification for 403s
-                    if result.get('verification'):
-                        print(f"   └─ Verification: {result['verification']}")
-
-                    # Show preview if available (and not a false positive warning)
-                    if result.get('preview') and not result.get('is_false_positive'):
-                        preview = result['preview'][:80].replace('\n', ' ').strip()
-                        print(f"   └─ Preview: {preview}...")
-
-                    # Show quick actions
-                    if result['status_code'] != 403:
-                        # For non-403 endpoints show only download (browser/curl are not useful)
-                        if result.get('download_command') and not is_dir:
-                            print(f"   └─ Actions:")
-                            print(f"      • Download: {result['download_command']}")
-                    # For 403 endpoints the bypass section below already contains all actionable commands
-
-                    # Show bypasses if found (for 403s)
-                    if result.get('bypasses'):
-                        # Count verified vs needs-verification bypasses
-                        verified = [b for b in result['bypasses'] if not b.get('needs_verification')]
-                        needs_check = [b for b in result['bypasses'] if b.get('needs_verification')]
-
-                        if verified:
-                            print(f"\n   ✅ VERIFIED BYPASSES ({len(verified)}):")
-                            for bypass in verified:
-                                self._print_bypass_details(bypass)
-
-                        if needs_check:
-                            print(f"\n   ⚠️  BYPASSES NEEDING VERIFICATION ({len(needs_check)}):")
-                            for bypass in needs_check:
-                                self._print_bypass_details(bypass, show_warning=True)
-
-            # Summary of bypasses
-            if bypass_results:
-                # Count unique endpoints with at least one bypass
-                endpoints_with_bypass = len([r for r in all_interesting if r.get('bypasses')])
-
-                print(f"\n{'=' * 60}")
-                print("  403 BYPASS SUMMARY")
-                print(f"{'=' * 60}")
-                print(f"  Found {len(bypass_results)} bypass techniques across {endpoints_with_bypass} endpoint(s)\n")
-
-                # Categorise bypasses
-                categories = {
-                    'HTTP Methods':    {},
-                    'Path Manipulation': {},
-                    'Header Injection': {},
-                    'Case Variation':   {},
-                    'Other':           {},
-                }
-                cat_map = {
-                    'HTTP Method': 'HTTP Methods',
-                    'Path':        'Path Manipulation',
-                    'Header':      'Header Injection',
-                    'Case':        'Case Variation',
-                }
-                for bypass in bypass_results:
-                    method = bypass['method']
-                    cat = 'Other'
-                    for prefix, label in cat_map.items():
-                        if method.startswith(prefix):
-                            cat = label
-                            break
-                    categories[cat][method] = categories[cat].get(method, 0) + 1
-
-                for cat_name, techniques in categories.items():
-                    if not techniques:
-                        continue
-                    total = sum(techniques.values())
-                    print(f"  ┌─ {cat_name} ({total} bypass(es))")
-                    for method, count in sorted(techniques.items(), key=lambda x: -x[1]):
-                        print(f"  │  • {method}: {count} endpoint(s)")
-                    print(f"  │")
-        
                 if bypass_results:
                     print(f"\n  {'─'*56}")
                     print(f"  403 BYPASS SUMMARY  ({len(bypass_results)} techniques worked)")

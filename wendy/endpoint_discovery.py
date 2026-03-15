@@ -1230,28 +1230,40 @@ class EndpointDiscovery:
                     timeout=10, verify=False,
                     allow_redirects=False,
                 )
-                if r.status_code == 200:
-                    # 200 without redirect = admin panel accessible without auth
-                    if 'wp-login' not in r.text.lower() and 'log in' not in r.text.lower():
+                if r.status_code in (301, 302, 303, 307, 308):
+                    # Redirect — check it goes toward wp-login, not some open panel
+                    location = r.headers.get('Location', '')
+                    if 'wp-login' not in location and 'login' not in location.lower():
                         findings.append({
-                            'severity': 'HIGH',
-                            'title': f'{label} accessible without authentication',
-                            'desc': (f'{path} returns HTTP 200 without redirecting to '
-                                     f'wp-login.php — admin panel may be reachable'),
+                            'severity': 'MEDIUM',
+                            'title': f'{label} redirects to unexpected location',
+                            'desc': (f'{path} redirects to {location!r} instead of wp-login.php '
+                                     f'— verify the redirect target is a login page'),
+                            'url': f"{base}{path}",
+                        })
+                    # else: redirects to wp-login — correct and safe, no finding
+                elif r.status_code == 200:
+                    # 200 without redirect — check body for login form
+                    body_lower = r.text.lower()
+                    if 'wp-login' in body_lower or 'log in' in body_lower or 'loginform' in body_lower:
+                        # Inline login form (unusual but not a vulnerability per se)
+                        findings.append({
+                            'severity': 'INFO',
+                            'title': f'{label} serves login form inline (unusual config)',
+                            'desc': (f'{path} returns HTTP 200 with embedded login form '
+                                     f'instead of 302 redirect — possible custom auth plugin'),
                             'url': f"{base}{path}",
                         })
                     else:
-                        # Returns 200 but contains login form inline (unusual config)
+                        # 200 with no login form at all — admin panel open
                         findings.append({
-                            'severity': 'MEDIUM',
-                            'title': f'{label} returns login form inline (unusual)',
-                            'desc': f'{path} returns 200 with embedded login form instead of 302 redirect',
+                            'severity': 'HIGH',
+                            'title': f'{label} accessible without authentication',
+                            'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
+                                     f'and body shows no login form — admin panel may be exposed'),
                             'url': f"{base}{path}",
                         })
-                elif r.status_code == 200:
-                    pass  # handled above
-                # 302/301 to wp-login.php is expected and safe
-                # 403 is also acceptable (hardened by plugin/server)
+                # 403/401 = server-level block, even more hardened than default — no finding
             except Exception:
                 pass
 
@@ -1272,6 +1284,7 @@ class EndpointDiscovery:
         _sentinel_pass = 'WENDY_probe_xK9z2Qm4'
         bodies = []
         headers_list = []
+        status_codes = []
         for _ in range(2):
             try:
                 r = self.session.post(
@@ -1285,6 +1298,7 @@ class EndpointDiscovery:
                 )
                 bodies.append(r.text.lower())
                 headers_list.append(dict(r.headers))
+                status_codes.append(r.status_code)
             except Exception:
                 pass
             time.sleep(1.5)
@@ -1292,12 +1306,25 @@ class EndpointDiscovery:
         if not bodies:
             return findings
 
-        body = bodies[0]
+        # If wp-login.php is blocked at server level (403/401), report as INFO positive
+        if all(s in (401, 403) for s in status_codes):
+            findings.append({
+                'severity': 'INFO',
+                'title': 'wp-login.php blocked at server level',
+                'desc': (f'wp-login.php returns HTTP {status_codes[0]} — '
+                         'access is restricted at web-server/firewall level. '
+                         'This is a hardening measure that prevents brute force.'),
+                'url': login_url,
+            })
+            return findings
 
-        # CAPTCHA indicators
+        # Combine all response bodies for signal detection
+        # (CAPTCHA appears on first load; lockout may only appear after 2nd failure)
+        all_bodies = ' '.join(bodies)
+
         captcha_signals = ['g-recaptcha', 'hcaptcha', 'captcha', 'cf-turnstile',
                            'wpcf7-recaptcha', 'ninja-captcha']
-        if any(s in body for s in captcha_signals):
+        if any(s in all_bodies for s in captcha_signals):
             findings.append({
                 'severity': 'INFO',
                 'title': 'CAPTCHA detected on wp-login.php',
@@ -1305,21 +1332,19 @@ class EndpointDiscovery:
                 'url': login_url,
             })
 
-        # Rate limiting / lockout: check for 429, Retry-After, or lockout message
         lockout_signals = ['too many', 'locked out', 'lockout', 'blocked',
                            'too many failed', 'security lockout', 'limit reached']
-        if any(s in body for s in lockout_signals):
+        if any(s in all_bodies for s in lockout_signals):
             findings.append({
                 'severity': 'INFO',
-                'title': 'Account lockout detected on wp-login.php',
-                'desc': 'Login endpoint shows lockout/throttle message after repeated failures',
+                'title': 'Account lockout/throttle detected on wp-login.php',
+                'desc': 'Login endpoint shows lockout or throttle message after repeated failures',
                 'url': login_url,
             })
 
-        # 2FA indicators
         twofa_signals = ['two-factor', '2fa', 'otp', 'authenticator', 'verification code',
                          'one-time password', 'totp']
-        if any(s in body for s in twofa_signals):
+        if any(s in all_bodies for s in twofa_signals):
             findings.append({
                 'severity': 'INFO',
                 'title': '2FA indicator detected on wp-login.php',
@@ -1327,23 +1352,24 @@ class EndpointDiscovery:
                 'url': login_url,
             })
 
-        # No protection detected
-        no_protection = not any(
-            any(s in b for s in captcha_signals + lockout_signals + twofa_signals)
-            for b in bodies
-        )
-        if no_protection:
-            # Check for Retry-After or X-RateLimit headers
+        # No protection detected — check for rate-limit response headers
+        all_signals = captcha_signals + lockout_signals + twofa_signals
+        if not any(s in all_bodies for s in all_signals):
             rate_headers = ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining']
-            has_rate_header = any(
-                h in hl for hl in headers_list for h in rate_headers
-            )
-            if not has_rate_header:
+            has_rate_header = any(h in hl for hl in headers_list for h in rate_headers)
+            if has_rate_header:
+                findings.append({
+                    'severity': 'INFO',
+                    'title': 'Rate-limit headers detected on wp-login.php',
+                    'desc': 'Server returns rate-limiting headers on repeated login attempts',
+                    'url': login_url,
+                })
+            else:
                 findings.append({
                     'severity': 'MEDIUM',
                     'title': 'No brute force protection detected on wp-login.php',
-                    'desc': ('wp-login.php shows no CAPTCHA, lockout, 2FA, or rate-limit headers. '
-                             'Password spraying/brute force attacks are unmitigated.'),
+                    'desc': ('wp-login.php shows no CAPTCHA, lockout, 2FA, or rate-limit headers '
+                             'after repeated failed logins. Password spraying attacks are unmitigated.'),
                     'url': login_url,
                 })
 
@@ -1400,23 +1426,35 @@ class EndpointDiscovery:
             f"{base}/wp-json/wp/v2/posts/99999999",   # non-existent post
             f"{base}/wp-json/wp/v2/media/99999999",   # non-existent media
         ]
-        debug_signals = [
-            'wp_debug', 'wp-content/plugins', 'wp-includes/',
-            'stack trace', 'call stack', 'notice:', 'warning:', 'fatal error:',
-            'php notice', 'php warning', 'php fatal',
-            'uncaught error', 'uncaught exception',
+        # Signals that only appear in PHP error/debug output, not in normal REST JSON.
+        # We use two tiers:
+        # - Strong signals: unambiguous PHP error prefixes (trigger on their own)
+        # - Path signals: file paths that appear in stack traces (require "on line" context)
+        strong_signals = [
+            'wp_debug',
+            '<b>fatal error</b>', '<b>parse error</b>',
+            '<b>notice</b>', '<b>warning</b>', '<b>deprecated</b>',
+            'php fatal error:', 'php parse error:', 'php notice:', 'php warning:',
+            'stack trace:', 'call stack:',
+            'uncaught error:', 'uncaught exception:',
         ]
         for url in probe_urls:
             r = self._safe_get(url, timeout=8)
             if r and r.status_code in (400, 404, 200):
                 body_lower = r.text.lower()
-                triggered = [s for s in debug_signals if s in body_lower]
+                triggered = [s for s in strong_signals if s in body_lower]
+                # Also check for PHP stack trace pattern: path + "on line N"
+                if not triggered and re.search(
+                    r'(?:wp-includes|wp-content)/[^\s"<>]+\.php on line \d+',
+                    r.text, re.IGNORECASE
+                ):
+                    triggered = ['PHP stack trace with file path detected']
                 if triggered:
                     findings.append({
                         'severity': 'MEDIUM',
                         'title': 'WP_DEBUG appears active — PHP errors leak to responses',
-                        'desc': (f'REST API error response contains debug output signals: '
-                                 f'{", ".join(triggered[:3])}. '
+                        'desc': (f'REST API error response contains debug output: '
+                                 f'{", ".join(triggered[:2])}. '
                                  f'WP_DEBUG=true in production exposes internal paths and logic.'),
                         'url': url,
                     })
@@ -2577,7 +2615,13 @@ class EndpointDiscovery:
         def _print_findings(findings_list):
             for issue in findings_list:
                 sev = sev_color(issue['severity'])
-                icon = C.GREEN + '✓' + C.RESET if issue['severity'] == 'INFO' else C.YELLOW + '⚠' + C.RESET
+                _s = issue['severity'].upper()
+                if _s == 'INFO':
+                    icon = C.GREEN + '✓' + C.RESET
+                elif _s in ('HIGH', 'CRITICAL'):
+                    icon = C.RED + '⚠' + C.RESET
+                else:
+                    icon = C.YELLOW + '⚠' + C.RESET
                 print(f"  {icon} {sev}  {issue['title']}")
                 self.vprint(f"     {C.DIM}{issue['desc']}{C.RESET}", level=1)
                 if self.verbosity >= 1 and issue.get('url'):
@@ -2593,14 +2637,14 @@ class EndpointDiscovery:
         # 7b. wp-admin directory protection
         wpadmin_findings = self.check_wpadmin_protection(base_url)
         if not wpadmin_findings:
-            print(f"  {C.GREEN}✓{C.RESET} wp-admin: properly redirects unauthenticated requests")
+            print(f"  {C.GREEN}✓{C.RESET} wp-admin: properly protected (redirect or server-level block)")
         else:
             _print_findings(wpadmin_findings)
 
         # 7c. wp-login.php brute force protection
         login_findings = self.check_login_protection(base_url)
         if not login_findings:
-            print(f"  {C.GREEN}✓{C.RESET} wp-login.php: brute force status unknown")
+            print(f"  {C.YELLOW}⚠{C.RESET} wp-login.php: could not reach login endpoint (network error or page moved)")
         else:
             _print_findings(login_findings)
 

@@ -1582,31 +1582,21 @@ class EndpointDiscovery:
             '/wp-config.php','/wp-config-sample.php','/wp-config-local.php',
             '/wp-config.php~','/wp-config.php.bak','/wp-config.php.old',
             '/wp-config.inc.php','/wp-config.backup.php',
-            # .env variants
+            # .env variants (commonly placed in WP web root by hosting panels)
             '/.env','/.env.local','/.env.production','/.env.dev','/.env.prod',
             '/.env.stage','/.env.staging','/.env.test','/.env.backup',
             '/.env.bak','/.env.old','/.env.example','/.env.sample',
             '/.env.template','/.env.default','/.env.php','/.env.dist',
             '/backup.env','/db.env','/app.env',
-            # PHP config files
+            # PHP config files (common WP/PHP patterns)
             '/config.php','/config.inc.php','/local-config.php','/local.php',
             '/settings.php','/settings.local.php','/configuration.php',
             '/database.php','/db.php','/connect.php','/connection.php',
             '/credentials.php','/secrets.php','/globals.php',
-            # Framework configs
-            '/parameters.yml','/parameters.yaml','/services.yml','/services.yaml',
+            # PHP dependency manager (WP uses Composer)
+            '/composer.json','/composer.lock',
             '/config.json','/config.yml','/config.yaml',
-            '/app.json','/appsettings.json','/appsettings.development.json',
-            '/composer.json','/composer.lock','/package.json','/package-lock.json',
-            '/yarn.lock','/Gemfile','/Gemfile.lock','/Pipfile','/Pipfile.lock',
-            # Cloud/infra configs
-            '/firebase.json','/credentials.json','/.boto',
-            '/terraform.tfvars','/terraform.tfstate','/.terraform/terraform.tfstate',
-            '/serverless.yml','/serverless.yaml','/ansible.cfg',
-            '/kubernetes.yml','/helm/values.yaml','/Chart.yaml',
-            '/.travis.yml','/.circleci/config.yml','/Jenkinsfile',
-            '/circle.yml','/.github/workflows/',
-            # Git metadata
+            # Git metadata (exposed after git clone in web root)
             '/.git/config','/.git/HEAD','/.git/index','/.git/COMMIT_EDITMSG',
             '/.git/logs/HEAD','/.git/packed-refs','/.git/refs/heads/',
             '/.gitmodules','/.gitignore','/.git-credentials','/.gitattributes',
@@ -1614,16 +1604,11 @@ class EndpointDiscovery:
             '/web.config','/server.xml','/.htpasswd','/.htaccess',
             '/php.ini','/.user.ini','/nginx.conf','/nginx.conf.bak',
             '/apache.conf','/httpd.conf',
-            # IDE/editor
+            # IDE/editor (left on server by devs)
             '/.vscode/settings.json','/.vscode/launch.json',
             '/.idea/workspace.xml','/.idea/dataSources.xml',
-            # Container
-            '/.dockerignore','/Dockerfile','/docker-compose.yml',
-            '/docker-compose.yaml','/docker-compose.override.yml',
-            '/.dockercfg','/.docker/config.json',
-            # Runtime/deploy
-            '/Procfile','/runtime.txt','/requirements.txt','/setup.py',
-            '/manage.py','/artisan','/wp-cli.yml',
+            # WP CLI config
+            '/wp-cli.yml',
         ]
 
     def get_log_endpoints(self, base_url):
@@ -1650,15 +1635,11 @@ class EndpointDiscovery:
             '/logs/','/logs/debug.log','/logs/error.log',
             '/logs/access.log','/logs/app.log',
             '/log/','/log/error.log','/log/access.log','/log/debug.log',
-            # Application logs
+            # Generic PHP/web logs (can exist on any WP server)
             '/application.log','/app.log','/system.log',
-            '/laravel.log','/storage/logs/laravel.log','/storage/logs/',
             # PHP error logs
             '/php_errors.log','/php_error.log','/php.log',
             '/php-errors.log','/phperror.log',
-            # DB logs
-            '/mysql.log','/mysqld.log','/mysql-error.log',
-            '/mysql-slow.log','/mariadb.log',
         ]
 
     def get_directory_endpoints(self, base_url):
@@ -1691,10 +1672,8 @@ class EndpointDiscovery:
             '/temp/','/tmp/','/cache/','/logs/','/log/',
             '/private/','/secure/','/internal/','/admin/',
             '/staging/','/test/','/dev/','/development/','/prod/',
-            # Common web panels (fingerprinting)
-            '/phpmyadmin/','/phpMyAdmin/','/pma/','/adminer/',
-            '/cpanel/','/webmail/','/panel/','/console/',
-            '/api/','/v1/','/v2/','/v3/',
+            # WP REST API root (separate from ajax, used for discovery)
+            '/wp-json/',
             '/.well-known/',
         ]
 
@@ -1842,17 +1821,8 @@ class EndpointDiscovery:
             '/wp-content/uploads/logs/',
             # PHP error logs
             '/php_error.log','/php_errors.log','/error_log',
-            # Framework debug/profiling
-            '/_profiler/','/_wdt/',
-            '/telescope','/telescope/requests',
-            '/horizon','/horizon/api/',
-            '/nova-api/',
-            '/actuator','/actuator/health','/actuator/env','/actuator/info',
-            '/actuator/metrics','/actuator/beans',
-            '/__clockwork/','/__clockwork/latest',
-            '/clockwork/',
-            '/api/debug','/api/health','/api/status',
-            '/_ah/health','/_ah/ready',  # Google App Engine
+            # PHP profiler (Clockwork - generic PHP, sometimes on WP)
+            '/__clockwork/','/__clockwork/latest','/clockwork/',
         ]
 
     def get_plugin_specific_endpoints(self, base_url):
@@ -1949,57 +1919,37 @@ class EndpointDiscovery:
 
     def get_sensitive_files_endpoints(self, base_url):
         return [
-            # SSH keys
-            '/.ssh/id_rsa','/.ssh/id_dsa','/.ssh/id_ecdsa','/.ssh/id_ed25519',
-            '/.ssh/id_rsa.pub','/.ssh/id_dsa.pub','/.ssh/id_ecdsa.pub','/.ssh/id_ed25519.pub',
-            '/.ssh/authorized_keys','/.ssh/known_hosts','/.ssh/config',
+            # Private keys accidentally placed in web root
             '/id_rsa','/id_rsa.pub','/id_dsa','/private_key',
-            # TLS/SSL keys
+            # TLS/SSL keys (sometimes in web root on cheap hosting)
             '/server.key','/server.crt','/server.pem','/server.p12',
             '/cert.pem','/cert.key','/private.key','/private.pem',
             '/ssl.key','/ssl.crt','/ssl.pem',
-            # AWS
-            '/.aws/credentials','/.aws/config','/.aws/session-token',
-            # GCP
-            '/.gcloud/application_default_credentials.json',
-            '/.config/gcloud/credentials',
-            '/google-credentials.json','/gcp-credentials.json',
-            # Azure
-            '/.azure/credentials',
-            # Kubernetes / container
-            '/.kube/config','/.dockercfg','/.docker/config.json',
-            # S3 / object storage
+            # AWS credentials (misconfigured deployments / S3-backed WP)
+            '/.aws/credentials','/.aws/config',
             '/.s3cfg','/.boto','/.passwd-s3fs',
-            # npm / Python / Ruby
-            '/.npmrc','/.yarnrc','/.pypirc',
-            '/.pip/pip.conf','/.gem/credentials',
-            # Shell histories
-            '/.bash_history','/.zsh_history','/.sh_history',
-            '/.mysql_history','/.psql_history','/.mongo_history',
-            '/.python_history','/.local/share/recently-used.xbel',
-            # Credential files
+            # Google API credentials (WP plugins: Site Kit, Google Analytics, etc.)
+            '/google-credentials.json','/gcp-credentials.json',
+            '/client_secret.json','/service_account.json',
+            # Generic credential files (common on WP project repos)
             '/.netrc','/.git-credentials','/.gitconfig',
+            '/.npmrc',
             '/auth.json','/credentials','/credentials.json',
             '/keys.json','/token.json','/tokens.json',
             '/access_token','/refresh_token',
-            '/client_secret.json','/service_account.json',
-            # Vault / secrets
+            # Secrets files (sometimes in WP project root)
             '/.vault-token','/secrets.yml','/secrets.yaml',
             '/secrets.json','/secrets.env',
-            # System (may be web-accessible in misconfigs)
-            '/.passwd','/.shadow','/etc/passwd','/etc/shadow',
+            # WP-specific system files
             '/.htpasswd',
-            # WP CLI
             '/wp-cli.yml','/.wp-cli/config.yml',
-            # GPG
-            '/.gnupg/secring.gpg','/.gnupg/pubring.kbx',
-            # Terraform state (often contains credentials)
+            # Terraform state (sometimes in project root alongside WP)
             '/terraform.tfstate','/terraform.tfstate.backup',
-            '/.terraform/terraform.tfstate',
-            # Uploads sensitive
+            # Sensitive uploads (files mistakenly uploaded to WP media)
             '/wp-content/uploads/.env',
             '/wp-content/uploads/credentials.json',
             '/wp-content/uploads/config.php',
+            '/wp-content/uploads/wp-config.php',
         ]
 
     # ── SINGLE ENDPOINT TEST ──────────────────────────────────────────────────

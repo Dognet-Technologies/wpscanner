@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WENDY - WordPress ENDpoint discoverY v0.3.0
+WENDY - WordPress ENDpoint discoverY v0.4.0
 Dognet Technologies srl | info@dognet.tech
 For authorized security testing only.
 
@@ -699,13 +699,16 @@ class EndpointDiscovery:
                 r = self._safe_get(style_url, timeout=5)
                 if r and r.status_code == 200:
                     content_type = r.headers.get('Content-Type', '')
-                    if 'text/html' not in content_type:
-                        themes_found[slug] = None
-                        print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
-                        continue
-                    elif _baseline_theme_status != 200:
-                        themes_found[slug] = None
-                        print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}", flush=True)
+                    if 'text/html' not in content_type or _baseline_theme_status != 200:
+                        # Extract version from style.css comment header (WordPress standard)
+                        ver_match = re.search(
+                            r'^Version:\s*([0-9][0-9A-Za-z.\-+]*)',
+                            r.text, re.MULTILINE | re.IGNORECASE
+                        )
+                        theme_ver = ver_match.group(1).strip() if ver_match else None
+                        themes_found[slug] = theme_ver
+                        ver_label = f" v{theme_ver}" if theme_ver else ""
+                        print(f"\r    Themes  [{i:3}/{theme_total}]  + {slug}{ver_label}", flush=True)
                         continue
                 print(f"\r    Themes  [{i:3}/{theme_total}]", end='', flush=True)
             print(flush=True)
@@ -814,8 +817,35 @@ class EndpointDiscovery:
         results = []
         for (hdr, critical, risk) in headers_spec:
             val = r.headers.get(hdr)
-            results.append({'header': hdr, 'present': bool(val),
-                             'value': val, 'critical': critical, 'risk': risk})
+            present = bool(val)
+            warn = None   # value-level warning even when header is present
+            if present:
+                vl = val.lower()
+                if hdr == 'Strict-Transport-Security':
+                    m = re.search(r'max-age\s*=\s*(\d+)', vl)
+                    if not m:
+                        warn = 'HSTS present but max-age not found'
+                    elif int(m.group(1)) < 31536000:
+                        warn = f'HSTS max-age too short ({m.group(1)}s < 31536000)'
+                elif hdr == 'Content-Security-Policy':
+                    unsafe = []
+                    if "'unsafe-inline'" in vl:
+                        unsafe.append("'unsafe-inline'")
+                    if "'unsafe-eval'" in vl:
+                        unsafe.append("'unsafe-eval'")
+                    if re.search(r"(?:default-src|script-src)\s+[^;]*\*", vl):
+                        unsafe.append('wildcard in default-src/script-src')
+                    if unsafe:
+                        warn = f"CSP weakened by: {', '.join(unsafe)}"
+                elif hdr == 'X-Frame-Options':
+                    if vl not in ('deny', 'sameorigin') and not vl.startswith('allow-from'):
+                        warn = f"Unrecognised X-Frame-Options value: {val}"
+                elif hdr == 'X-Content-Type-Options':
+                    if vl.strip() != 'nosniff':
+                        warn = f"Expected 'nosniff', got: {val}"
+            results.append({'header': hdr, 'present': present,
+                             'value': val, 'critical': critical, 'risk': risk,
+                             'warn': warn})
         return results
 
     # ── USER ENUMERATION ──────────────────────────────────────────────────────
@@ -827,19 +857,30 @@ class EndpointDiscovery:
         """
         users = {}   # id -> username
 
-        # Method 1: REST API /wp-json/wp/v2/users
-        r = self._safe_get(f"{base_url.rstrip('/')}/wp-json/wp/v2/users?per_page=100")
-        if r and r.status_code == 200:
+        # Method 1: REST API /wp-json/wp/v2/users (with pagination for >100 users)
+        _rest_page = 1
+        while True:
+            r = self._safe_get(
+                f"{base_url.rstrip('/')}/wp-json/wp/v2/users?per_page=100&page={_rest_page}"
+            )
+            if not r or r.status_code != 200:
+                break
             try:
                 data = r.json()
-                if isinstance(data, list):
-                    for u in data:
-                        uid  = u.get('id', '?')
-                        name = u.get('slug') or u.get('name') or u.get('link', '')
-                        if name:
-                            users[uid] = {'username': name, 'method': 'REST API', 'extra': u.get('name','')}
+                if not isinstance(data, list) or not data:
+                    break
+                for u in data:
+                    uid  = u.get('id', '?')
+                    name = u.get('slug') or u.get('name') or u.get('link', '')
+                    if name:
+                        users[uid] = {'username': name, 'method': 'REST API', 'extra': u.get('name','')}
+                # WordPress returns X-WP-TotalPages header; stop if no more pages
+                total_pages = int(r.headers.get('X-WP-TotalPages', 1))
+                if _rest_page >= total_pages or len(data) < 100:
+                    break
+                _rest_page += 1
             except Exception:
-                pass
+                break
 
         # Method 2: Author archives redirect /?author=N
         max_id = 20 if self.aggressive else 5
@@ -907,6 +948,20 @@ class EndpointDiscovery:
                 except Exception:
                     pass
                 time.sleep(random.uniform(1.0, 2.0))
+
+        # Method 5: REST API comments - author_name field leaks display names
+        r5 = self._safe_get(f"{base_url.rstrip('/')}/wp-json/wp/v2/comments?per_page=100&_fields=author_name")
+        if r5 and r5.status_code == 200:
+            try:
+                comments = r5.json()
+                if isinstance(comments, list):
+                    for c in comments:
+                        aname = (c.get('author_name') or '').strip()
+                        if aname and aname not in [v['username'] for v in users.values()]:
+                            users[f'comment_{aname}'] = {'username': aname,
+                                                         'method': 'REST API comments', 'extra': ''}
+            except Exception:
+                pass
 
         return list(users.values())
 
@@ -1045,12 +1100,6 @@ class EndpointDiscovery:
             ('/crossdomain.xml',
              lambda r: r.status_code == 200 and 'allow-access-from' in r.text.lower(),
              'MEDIUM', 'crossdomain.xml permissive', 'Permissive crossdomain.xml allows cross-origin Flash/PDF access'),
-            ('/xmlrpc.php',
-             lambda r: r.status_code == 200 and 'xml' in r.text.lower(),
-             'MEDIUM', 'XML-RPC enabled', 'XML-RPC endpoint active - brute-force and SSRF risk'),
-            ('/wp-json/wp/v2/users',
-             lambda r: r.status_code == 200 and '"slug"' in r.text,
-             'MEDIUM', 'REST API users public', 'Unauthenticated REST API exposes user list'),
             ('/wp-content/uploads/',
              lambda r: r.status_code == 200 and ('index of' in r.text.lower() or '<a href=' in r.text.lower()),
              'MEDIUM', 'Uploads directory listable', 'wp-content/uploads/ directory listing is enabled'),
@@ -1100,6 +1149,325 @@ class EndpointDiscovery:
                 except Exception:
                     pass
             time.sleep(random.uniform(0.2, 0.5))
+
+        return findings
+
+    # ── REST API ENUMERATION ──────────────────────────────────────────────────
+
+    def check_rest_api(self, base_url):
+        """
+        Enumerate WordPress REST API namespaces and check for information leakage.
+        Returns list of finding dicts.
+        """
+        findings = []
+        base = base_url.rstrip('/')
+
+        # 1. Enumerate registered namespaces from /wp-json/
+        r = self._safe_get(f"{base}/wp-json/")
+        if r and r.status_code == 200 and not self._matches_homepage(r, base_url):
+            try:
+                data = r.json()
+                namespaces = data.get('namespaces', [])
+                if namespaces:
+                    findings.append({
+                        'severity': 'INFO',
+                        'title': f'REST API exposes {len(namespaces)} namespace(s)',
+                        'desc': 'Registered namespaces: ' + ', '.join(namespaces),
+                        'url': f"{base}/wp-json/",
+                    })
+                # Flag custom plugin namespaces (anything not in core WP set)
+                _core_ns = {'wp/v2', 'oembed/1.0', 'wp-site-health/v1',
+                            'wp-block-editor/v1', 'wp/v3'}
+                custom_ns = [n for n in namespaces if n not in _core_ns]
+                if custom_ns:
+                    findings.append({
+                        'severity': 'INFO',
+                        'title': f'Custom REST API namespace(s) detected: {", ".join(custom_ns[:5])}',
+                        'desc': 'Plugin/theme REST endpoints may expose additional attack surface',
+                        'url': f"{base}/wp-json/",
+                    })
+            except Exception:
+                pass
+
+        # 2. /wp-json/wp/v2/settings — often leaks admin_email and siteurl
+        r_settings = self._safe_get(f"{base}/wp-json/wp/v2/settings")
+        if r_settings and r_settings.status_code == 200 and not self._matches_homepage(r_settings, base_url):
+            try:
+                settings = r_settings.json()
+                if isinstance(settings, dict) and settings:
+                    leaked = [k for k in ('email', 'url', 'title', 'description',
+                                          'timezone', 'date_format') if k in settings]
+                    if leaked:
+                        findings.append({
+                            'severity': 'MEDIUM',
+                            'title': 'REST API /settings endpoint unauthenticated',
+                            'desc': (f'/wp-json/wp/v2/settings accessible without auth — '
+                                     f'leaks: {", ".join(leaked)}'),
+                            'url': f"{base}/wp-json/wp/v2/settings",
+                        })
+            except Exception:
+                pass
+
+        return findings
+
+    # ── WP-ADMIN PROTECTION ───────────────────────────────────────────────────
+
+    def check_wpadmin_protection(self, base_url):
+        """
+        Verify that /wp-admin/ and /wp-admin/index.php redirect to login
+        when accessed unauthenticated. A 200 without redirect is a finding.
+        Returns list of finding dicts.
+        """
+        findings = []
+        base = base_url.rstrip('/')
+
+        for path, label in [('/wp-admin/', 'wp-admin/'),
+                             ('/wp-admin/index.php', 'wp-admin/index.php')]:
+            try:
+                r = self.session.get(
+                    f"{base}{path}",
+                    headers=self.get_random_headers(),
+                    timeout=10, verify=False,
+                    allow_redirects=False,
+                )
+                if r.status_code in (301, 302, 303, 307, 308):
+                    # Redirect — check it goes toward wp-login, not some open panel
+                    location = r.headers.get('Location', '')
+                    if 'wp-login' not in location and 'login' not in location.lower():
+                        findings.append({
+                            'severity': 'MEDIUM',
+                            'title': f'{label} redirects to unexpected location',
+                            'desc': (f'{path} redirects to {location!r} instead of wp-login.php '
+                                     f'— verify the redirect target is a login page'),
+                            'url': f"{base}{path}",
+                        })
+                    # else: redirects to wp-login — correct and safe, no finding
+                elif r.status_code == 200:
+                    # 200 without redirect — check body for login form
+                    body_lower = r.text.lower()
+                    if 'wp-login' in body_lower or 'log in' in body_lower or 'loginform' in body_lower:
+                        # Inline login form (unusual but not a vulnerability per se)
+                        findings.append({
+                            'severity': 'INFO',
+                            'title': f'{label} serves login form inline (unusual config)',
+                            'desc': (f'{path} returns HTTP 200 with embedded login form '
+                                     f'instead of 302 redirect — possible custom auth plugin'),
+                            'url': f"{base}{path}",
+                        })
+                    else:
+                        # 200 with no login form at all — admin panel open
+                        findings.append({
+                            'severity': 'HIGH',
+                            'title': f'{label} accessible without authentication',
+                            'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
+                                     f'and body shows no login form — admin panel may be exposed'),
+                            'url': f"{base}{path}",
+                        })
+                # 403/401 = server-level block, even more hardened than default — no finding
+            except Exception:
+                pass
+
+        return findings
+
+    # ── WP-LOGIN BRUTE FORCE PROTECTION ──────────────────────────────────────
+
+    def check_login_protection(self, base_url):
+        """
+        Detect whether wp-login.php has brute force mitigations:
+        rate limiting, CAPTCHA, account lockout, 2FA indicators.
+        Returns list of finding dicts.
+        """
+        findings = []
+        login_url = f"{base_url.rstrip('/')}/wp-login.php"
+
+        # Test with intentionally wrong credentials twice and observe differences
+        _sentinel_pass = 'WENDY_probe_xK9z2Qm4'
+        bodies = []
+        headers_list = []
+        status_codes = []
+        for _ in range(2):
+            try:
+                r = self.session.post(
+                    login_url,
+                    data={'log': 'admin', 'pwd': _sentinel_pass,
+                          'wp-submit': 'Log+In', 'redirect_to': '/wp-admin/',
+                          'testcookie': '1'},
+                    headers={**self.get_random_headers(),
+                              'Content-Type': 'application/x-www-form-urlencoded'},
+                    timeout=10, verify=False, allow_redirects=True,
+                )
+                bodies.append(r.text.lower())
+                headers_list.append(dict(r.headers))
+                status_codes.append(r.status_code)
+            except Exception:
+                pass
+            time.sleep(1.5)
+
+        if not bodies:
+            return findings
+
+        # If wp-login.php is blocked at server level (403/401), report as INFO positive
+        if all(s in (401, 403) for s in status_codes):
+            findings.append({
+                'severity': 'INFO',
+                'title': 'wp-login.php blocked at server level',
+                'desc': (f'wp-login.php returns HTTP {status_codes[0]} — '
+                         'access is restricted at web-server/firewall level. '
+                         'This is a hardening measure that prevents brute force.'),
+                'url': login_url,
+            })
+            return findings
+
+        # Combine all response bodies for signal detection
+        # (CAPTCHA appears on first load; lockout may only appear after 2nd failure)
+        all_bodies = ' '.join(bodies)
+
+        captcha_signals = ['g-recaptcha', 'hcaptcha', 'captcha', 'cf-turnstile',
+                           'wpcf7-recaptcha', 'ninja-captcha']
+        if any(s in all_bodies for s in captcha_signals):
+            findings.append({
+                'severity': 'INFO',
+                'title': 'CAPTCHA detected on wp-login.php',
+                'desc': 'Login form has CAPTCHA protection — brute force more difficult',
+                'url': login_url,
+            })
+
+        lockout_signals = ['too many', 'locked out', 'lockout', 'blocked',
+                           'too many failed', 'security lockout', 'limit reached']
+        if any(s in all_bodies for s in lockout_signals):
+            findings.append({
+                'severity': 'INFO',
+                'title': 'Account lockout/throttle detected on wp-login.php',
+                'desc': 'Login endpoint shows lockout or throttle message after repeated failures',
+                'url': login_url,
+            })
+
+        twofa_signals = ['two-factor', '2fa', 'otp', 'authenticator', 'verification code',
+                         'one-time password', 'totp']
+        if any(s in all_bodies for s in twofa_signals):
+            findings.append({
+                'severity': 'INFO',
+                'title': '2FA indicator detected on wp-login.php',
+                'desc': 'Login page shows signs of two-factor authentication plugin',
+                'url': login_url,
+            })
+
+        # No protection detected — check for rate-limit response headers
+        all_signals = captcha_signals + lockout_signals + twofa_signals
+        if not any(s in all_bodies for s in all_signals):
+            rate_headers = ['Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining']
+            has_rate_header = any(h in hl for hl in headers_list for h in rate_headers)
+            if has_rate_header:
+                findings.append({
+                    'severity': 'INFO',
+                    'title': 'Rate-limit headers detected on wp-login.php',
+                    'desc': 'Server returns rate-limiting headers on repeated login attempts',
+                    'url': login_url,
+                })
+            else:
+                findings.append({
+                    'severity': 'MEDIUM',
+                    'title': 'No brute force protection detected on wp-login.php',
+                    'desc': ('wp-login.php shows no CAPTCHA, lockout, 2FA, or rate-limit headers '
+                             'after repeated failed logins. Password spraying attacks are unmitigated.'),
+                    'url': login_url,
+                })
+
+        return findings
+
+    # ── PHP EXECUTION IN UPLOADS ──────────────────────────────────────────────
+
+    def check_uploads_php_execution(self, base_url):
+        """
+        Test whether the server executes PHP files in wp-content/uploads/.
+        This is one of the most exploited WordPress misconfigurations.
+        Returns list of finding dicts.
+        """
+        findings = []
+        # We probe for a PHP file that couldn't plausibly exist (no actual PHP sent)
+        probe_name = f"wendy-probe-{random.randint(10000,99999)}.php"
+        probe_url  = f"{base_url.rstrip('/')}/wp-content/uploads/{probe_name}"
+        try:
+            r = self._safe_get(probe_url, timeout=8)
+            if r:
+                if r.status_code == 200:
+                    # A 200 for a non-existent .php file in uploads means the server
+                    # is either executing PHP (empty output) or serving raw source.
+                    findings.append({
+                        'severity': 'HIGH',
+                        'title': 'PHP execution in uploads/ not blocked (soft evidence)',
+                        'desc': (f'{probe_url} returned 200 for a non-existent .php file. '
+                                 'The server likely processes PHP in wp-content/uploads/ — '
+                                 'any uploaded PHP webshell would execute.'),
+                        'url': probe_url,
+                    })
+                elif r.status_code == 403:
+                    # 403 on a non-existent .php file means server blocks PHP execution
+                    # This is the desired hardened state — no finding needed
+                    pass
+                # 404 = neither execution nor block rule matched (likely safe / normal)
+        except Exception:
+            pass
+        return findings
+
+    # ── WP_DEBUG DETECTION ────────────────────────────────────────────────────
+
+    def check_wp_debug(self, base_url):
+        """
+        Detect if WP_DEBUG is active by triggering a PHP/WP error via the REST API
+        and checking the response for PHP error output.
+        Returns list of finding dicts.
+        """
+        findings = []
+        base = base_url.rstrip('/')
+
+        # Trigger a WP error: invalid post ID forces a WP_Error / notice
+        probe_urls = [
+            f"{base}/wp-json/wp/v2/posts/99999999",   # non-existent post
+            f"{base}/wp-json/wp/v2/media/99999999",   # non-existent media
+        ]
+        # Signals that only appear in PHP error/debug output, not in normal REST JSON.
+        # We use two tiers:
+        # - Strong signals: unambiguous PHP error prefixes (trigger on their own)
+        # - Path signals: file paths that appear in stack traces (require "on line" context)
+        strong_signals = [
+            'wp_debug',
+            '<b>fatal error</b>', '<b>parse error</b>',
+            '<b>notice</b>', '<b>warning</b>', '<b>deprecated</b>',
+            'php fatal error:', 'php parse error:', 'php notice:', 'php warning:',
+            'stack trace:', 'call stack:',
+            'uncaught error:', 'uncaught exception:',
+        ]
+        for url in probe_urls:
+            r = self._safe_get(url, timeout=8)
+            if r and r.status_code in (400, 404, 200):
+                body_lower = r.text.lower()
+                triggered = [s for s in strong_signals if s in body_lower]
+                # Also check for PHP stack trace pattern: path + "on line N"
+                if not triggered and re.search(
+                    r'(?:wp-includes|wp-content)/[^\s"<>]+\.php on line \d+',
+                    r.text, re.IGNORECASE
+                ):
+                    triggered = ['PHP stack trace with file path detected']
+                if triggered:
+                    findings.append({
+                        'severity': 'MEDIUM',
+                        'title': 'WP_DEBUG appears active — PHP errors leak to responses',
+                        'desc': (f'REST API error response contains debug output: '
+                                 f'{", ".join(triggered[:2])}. '
+                                 f'WP_DEBUG=true in production exposes internal paths and logic.'),
+                        'url': url,
+                    })
+                    break  # one finding is enough
+            # Check for X-WP-Debug header (added by some plugins when debug is on)
+            if r and r.headers.get('X-WP-Debug'):
+                findings.append({
+                    'severity': 'MEDIUM',
+                    'title': 'X-WP-Debug header present',
+                    'desc': 'A plugin is advertising WP_DEBUG status via X-WP-Debug response header',
+                    'url': url,
+                })
+                break
 
         return findings
 
@@ -2067,10 +2435,13 @@ class EndpointDiscovery:
                     status = result['status_code']
                     reason = result.get('reason','')
                     verif  = ''
-                    if 'False positive' in result.get('verification',''):
+                    _verif_msg = result.get('verification', '')
+                    if 'False positive' in _verif_msg:
                         verif = f" {C.YELLOW}[FP]{C.RESET}"
-                    elif 'Real 403' in result.get('verification',''):
+                    elif 'Real 403' in _verif_msg:
                         verif = f" {C.GREEN}[VERIFIED]{C.RESET}"
+                    elif result.get('status_code') == 403:
+                        verif = f" {C.YELLOW}[UNVERIFIED]{C.RESET}"
                     bp_info = ''
                     if result.get('bypasses'):
                         n = len(result['bypasses'])
@@ -2089,7 +2460,7 @@ class EndpointDiscovery:
 
     def run_full_scan(self, base_url):
         base_url = base_url.rstrip('/')
-        TOTAL_PHASES = 8
+        TOTAL_PHASES = 9
 
         print(f"\n{C.BOLD}  Target :{C.RESET} {base_url}")
         print(f"{C.BOLD}  Mode   :{C.RESET} {'AGGRESSIVE' if self.aggressive else 'Normal'}"
@@ -2117,8 +2488,8 @@ class EndpointDiscovery:
         if self.verbosity >= 2:
             for slug, ver in sorted(plugins_found.items()):
                 print(f"    {C.DIM}plugin: {slug}  {('v'+ver) if ver else '(ver unknown)'}{C.RESET}")
-            for slug in sorted(themes_found.keys()):
-                print(f"    {C.DIM}theme:  {slug}{C.RESET}")
+            for slug, ver in sorted(themes_found.items()):
+                print(f"    {C.DIM}theme:  {slug}  {('v'+ver) if ver else '(ver unknown)'}{C.RESET}")
 
         # ── PHASE 2: CVE ANALYSIS ────────────────────────────────────────────
         self._section(2, TOTAL_PHASES, "CVE Analysis")
@@ -2190,7 +2561,11 @@ class EndpointDiscovery:
             for h in header_findings:
                 if h['present']:
                     val_str = f"  {C.DIM}{h['value'][:60]}{C.RESET}" if self.verbosity >= 1 else ''
-                    print(f"  {C.GREEN}✓{C.RESET} {h['header']:<35}{val_str}")
+                    if h.get('warn'):
+                        print(f"  {C.YELLOW}⚠{C.RESET} {h['header']:<35}{val_str}")
+                        print(f"     {C.YELLOW}└─ {h['warn']}{C.RESET}")
+                    else:
+                        print(f"  {C.GREEN}✓{C.RESET} {h['header']:<35}{val_str}")
                 else:
                     tag = f"{C.RED}[CRITICAL]{C.RESET}" if h['critical'] else f"{C.YELLOW}[OPTIONAL]{C.RESET}"
                     print(f"  {C.RED}✗{C.RESET} {h['header']:<35} {tag}  {C.DIM}{h['risk']}{C.RESET}")
@@ -2234,8 +2609,62 @@ class EndpointDiscovery:
                 if self.verbosity >= 1 and issue.get('url'):
                     print(f"     {C.DIM}URL: {issue['url']}{C.RESET}")
 
-        # ── PHASE 7: ENDPOINT DISCOVERY ──────────────────────────────────────
-        self._section(7, TOTAL_PHASES, "Endpoint Discovery")
+        # ── PHASE 7: ADVANCED WORDPRESS CHECKS ───────────────────────────────
+        self._section(7, TOTAL_PHASES, "Advanced WordPress Checks")
+
+        def _print_findings(findings_list):
+            for issue in findings_list:
+                sev = sev_color(issue['severity'])
+                _s = issue['severity'].upper()
+                if _s == 'INFO':
+                    icon = C.GREEN + '✓' + C.RESET
+                elif _s in ('HIGH', 'CRITICAL'):
+                    icon = C.RED + '⚠' + C.RESET
+                else:
+                    icon = C.YELLOW + '⚠' + C.RESET
+                print(f"  {icon} {sev}  {issue['title']}")
+                self.vprint(f"     {C.DIM}{issue['desc']}{C.RESET}", level=1)
+                if self.verbosity >= 1 and issue.get('url'):
+                    print(f"     {C.DIM}URL: {issue['url']}{C.RESET}")
+
+        # 7a. REST API namespace enumeration
+        rest_findings = self.check_rest_api(base_url)
+        if not rest_findings:
+            print(f"  {C.GREEN}✓{C.RESET} REST API: no namespace or settings leakage detected")
+        else:
+            _print_findings(rest_findings)
+
+        # 7b. wp-admin directory protection
+        wpadmin_findings = self.check_wpadmin_protection(base_url)
+        if not wpadmin_findings:
+            print(f"  {C.GREEN}✓{C.RESET} wp-admin: properly protected (redirect or server-level block)")
+        else:
+            _print_findings(wpadmin_findings)
+
+        # 7c. wp-login.php brute force protection
+        login_findings = self.check_login_protection(base_url)
+        if not login_findings:
+            print(f"  {C.YELLOW}⚠{C.RESET} wp-login.php: could not reach login endpoint (network error or page moved)")
+        else:
+            _print_findings(login_findings)
+
+        # 7d. PHP execution in uploads/
+        uploads_findings = self.check_uploads_php_execution(base_url)
+        if not uploads_findings:
+            print(f"  {C.GREEN}✓{C.RESET} uploads/: PHP execution appears blocked")
+        else:
+            _print_findings(uploads_findings)
+
+        # 7e. WP_DEBUG detection
+        debug_findings = self.check_wp_debug(base_url)
+        if not debug_findings:
+            self.vprint(f"  {C.GREEN}✓{C.RESET} WP_DEBUG: no debug output detected in REST API responses",
+                        level=1)
+        else:
+            _print_findings(debug_findings)
+
+        # ── PHASE 8: ENDPOINT DISCOVERY ──────────────────────────────────────
+        self._section(8, TOTAL_PHASES, "Endpoint Discovery")
 
         print(f"  Verifying 403 global validity...", end=' ', flush=True)
         self.valid_403s = self.verify_403_validity(base_url)
@@ -2320,7 +2749,7 @@ class EndpointDiscovery:
             print(f"  {C.GREEN}✓{C.RESET} No interesting endpoints found in scan")
 
         # ── PHASE 8: SUMMARY ─────────────────────────────────────────────────
-        self._section(8, TOTAL_PHASES, "Security Report Summary")
+        self._section(9, TOTAL_PHASES, "Security Report Summary")
 
         # Collect all findings for scoring + summary detail
         summary_findings = []  # (severity, label, detail)
@@ -2439,8 +2868,16 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog='wendy',
-        description='WENDY - WordPress ENDpoint discoverY v0.3.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
+        description='WENDY - WordPress ENDpoint discoverY v0.4.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            'Endpoint Discovery — 403 sigils:\n'
+            '  [VERIFIED]    Real 403 confirmed (canary URL returns 404 as expected)\n'
+            '  [UNVERIFIED]  403 likely real but could not be confirmed (network error)\n'
+            '  [FP]          False positive — server returns 403 for everything (WAF/global rule)\n'
+            '  (protected)   Real 403, bypass attempts failed — endpoint correctly hardened\n'
+            '  [N BYPASSES]  Real 403, but N bypass techniques returned 200\n'
+        ),
     )
     parser.add_argument('url', nargs='?', default=None,
                         help='Target WordPress URL (e.g. https://example.com)')
@@ -2488,7 +2925,7 @@ def main():
     print("#+#+# #+#+#  #+#        #+#   #+#+# #+#    #+#    #+#")
     print("###   ###   ########## ###    #### #########     ###")
     print()
-    print("  WENDY - WordPress ENDpoint discoverY  v0.3.0")
+    print("  WENDY - WordPress ENDpoint discoverY  v0.4.0")
     print("  Dognet Technologies srl | info@dognet.tech")
     print("  For Authorized Security Testing Only")
     print()

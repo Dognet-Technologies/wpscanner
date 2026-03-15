@@ -1,6 +1,6 @@
 # WENDY – WordPress ENDpoint discoverY
 
-**v0.3.0** | Dognet Technologies srl | `info@dognet.tech`
+**v0.4.0** | Dognet Technologies srl | `info@dognet.tech`
 
 WENDY è uno scanner di sicurezza per WordPress che automatizza endpoint
 discovery, CVE matching, analisi security headers, user enumeration e
@@ -16,20 +16,30 @@ testing** e **bug bounty** su ambienti WordPress.
 ### Core (tutte le modalità)
 - **WordPress Detection** – versione, tema attivo, plugin attivi
 - **Plugin/Theme Discovery** – fino a 15 000+ plugin e temi da database CVE
-  live (Wordfence Intelligence); versione letta direttamente da `readme.txt`
+  live (Wordfence Intelligence); versione letta da `readme.txt` (plugin) e
+  `style.css` (temi)
 - **Smart Probing** – in modalità normale proba i top 3 000 slug ordinati per
   score di priorità (popolarità WP.org × CVE recenti × severità); modalità
   aggressive proba tutto il database
 - **CVE Matching** – confronto versione installata vs database vulnerabilità;
   riporta CVE ID, CVSS score, severità, descrizione; supporta plugin e temi
-- **Security Headers** – verifica HSTS, CSP, X-Frame-Options, Referrer-Policy
-  e altri 5 header; distingue CRITICAL vs OPTIONAL
-- **User Enumeration** – REST API `/wp-json/wp/v2/users`, author archives
-  `/?author=N`, RSS feed, login error differential
+- **Security Headers** – verifica presenza e valore di HSTS, CSP,
+  X-Frame-Options, Referrer-Policy e altri header; segnala configurazioni
+  deboli (CSP con `unsafe-inline`/`unsafe-eval`, HSTS `max-age` troppo corto)
+- **User Enumeration** – REST API `/wp-json/wp/v2/users` (con paginazione),
+  author archives `/?author=N`, RSS feed, commenti REST API, login error
+  differential
 - **XML-RPC** – verifica accesso, pingback (DDoS amplification), multicall
   (brute-force amplification)
 - **Hardening Checks** – `wp-config.php`, `.env`, `debug.log`, `readme.html`,
   `install.php`, `xmlrpc.php`, directory listing su `wp-content/uploads/`
+- **Advanced WordPress Checks** *(nuovi in v0.4.0)*:
+  - REST API namespace enumeration + `/wp-json/wp/v2/settings` leakage
+  - Verifica protezione `wp-admin/` (redirect a login vs accesso diretto)
+  - Rilevamento protezioni anti-brute-force su `wp-login.php`
+    (CAPTCHA, lockout, 2FA, rate-limit headers)
+  - Test esecuzione PHP in `wp-content/uploads/`
+  - Rilevamento `WP_DEBUG` attivo in produzione via errori REST API
 
 ### Aggressive mode (`--aggressive`)
 - User enumeration estesa (fino a 20 author ID; login error differential)
@@ -49,7 +59,7 @@ WENDY usa **tre livelli** di database vulnerabilità:
 | **WPScan API** | wpscan.com/api/v3 | Real-time (aggressive mode) | Token gratuito |
 
 ### Wordfence Intelligence v3 (feed live)
-Il feed `cve_db.json` è generato da `wendy/update_db.py` che scarica da
+Il feed `cve_db.json` scarica da
 `https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production/`
 e richiede una **API key gratuita** di Wordfence.
 
@@ -67,19 +77,17 @@ cp wendy/.keys.example wendy/.keys
 echo "WORDFENCE_API_KEY=your_key_here" >> wendy/.keys
 
 # 3. Aggiorna il database
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 **Aggiornamento settimanale consigliato:**
 ```bash
-python -m wendy.update_db
-# oppure
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 Cron settimanale (es. ogni martedì alle 07:00):
 ```cron
-0 7 * * 2  cd /path/to/wpscanner && python wendy/update_db.py >> /var/log/wendy-db.log 2>&1
+0 7 * * 2  cd /path/to/wpscanner && python wendy/endpoint_discovery.py -u >> /var/log/wendy-db.log 2>&1
 ```
 
 Il file `cve_db.json` è gitignored — va rigenerato localmente dopo ogni clone.
@@ -107,7 +115,7 @@ cd wpscanner
 pip install requests
 
 # (Opzionale ma raccomandato) Aggiorna il database CVE live
-python wendy/update_db.py
+python wendy/endpoint_discovery.py -u
 ```
 
 Nessun altro package richiesto. WENDY funziona offline anche senza `cve_db.json`
@@ -124,6 +132,8 @@ Argomenti:
   URL                   URL base del sito WordPress (es. https://example.com)
 
 Opzioni:
+  -u, --update          Aggiorna WENDY (git pull) e il CVE database, poi esce
+                        (se combinato con URL, aggiorna prima poi scansiona)
   -v                    Verboso: mostra endpoint testati, plugin non trovati, ecc.
   -vv                   Molto verboso: include dettagli di ogni request
   --aggressive          Modalità estesa: più plugin/temi, user enum completa,
@@ -143,52 +153,85 @@ python wendy/endpoint_discovery.py https://example.com -v
 export WPSCAN_API_TOKEN="tok_xxxxxxxxxxxx"
 python wendy/endpoint_discovery.py https://example.com --aggressive -v
 
-# Dry-run aggiornamento DB (fetch senza salvare)
-python wendy/update_db.py --dry-run
+# Solo aggiornamento DB (poi esce)
+python wendy/endpoint_discovery.py -u
+
+# Aggiorna DB e scansiona in un solo comando
+python wendy/endpoint_discovery.py https://example.com -u
 ```
 
 ### Output tipico
 
 ```
-══════════════════════════════════════════════════════════
-  WENDY v0.3.0 – WordPress Security Scanner
+════════════════════════════════════════════════════════════════════════
+  WENDY v0.4.0 – WordPress Security Scanner
   Target : https://example.com
   Mode   : aggressive | verbosity: 1
-══════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 
-[1/7] WordPress Detection
-  ✓ WordPress detected
-  ✓ Version: 6.4.3  (source: readme.html)
-  ✓ Theme: Astra
+[1/9] Fingerprinting
+  ✓ WordPress version: 6.4.3  (via readme.html)
+  ✓ 4 plugin(s) detected  1 theme(s) detected
 
-[2/7] Plugin & Theme Discovery
-  ✓ 4 plugin(s) detected
-  ✓ 1 theme(s) detected
-
-[3/7] CVE Analysis
+[2/9] CVE Analysis
   ⚠ CRITICAL contact-form-7 v5.2.0
      CVE-2020-35489  CVSS 9.8  Unrestricted file upload allows uploading PHP shells
   ⚠ HIGH    elementor v3.4.0
      CVE-2022-1329   CVSS 9.9  Contributor+ RCE via template import functionality
 
-[4/7] Security Headers
+[3/9] Security Headers
   ✗ Strict-Transport-Security         [CRITICAL]  HSTS missing
-  ✗ Content-Security-Policy           [CRITICAL]  No CSP - XSS mitigation severely weakened
+  ⚠ Content-Security-Policy           unsafe-inline present
+     └─ CSP weakened by: 'unsafe-inline'
   ✓ X-Content-Type-Options
 
-[5/7] User Enumeration
-  ⚠ 2 user(s) enumerated:
+[4/9] User Enumeration
+  ⚠ 3 user(s) enumerated:
      • admin      [REST API]
      • john.doe   [Author archive]
+     • Jane       [REST API comments]
 
-[6/7] XML-RPC
+[5/9] XML-RPC
   ⚠ xmlrpc.php accessible
   ⚠ Pingback enabled (DDoS amplification risk)
 
-[7/7] Hardening Checks
+[6/9] Hardening Checks
   ⚠ readme.html publicly accessible (WordPress version disclosure)
   ✓ wp-config.php not accessible
+
+[7/9] Advanced WordPress Checks
+  ✓ INFO   REST API exposes 3 namespace(s)
+  ✓ INFO   Custom REST API namespace(s) detected: woocommerce/v3
+  ✓ wp-admin: properly protected (redirect or server-level block)
+  ⚠ MEDIUM  No brute force protection detected on wp-login.php
+  ✓ uploads/: PHP execution appears blocked
+  ✓ WP_DEBUG: no debug output detected in REST API responses
+
+[8/9] Endpoint Discovery
+  ✓ /mysql.sql → 403 Real 403 (protected) [VERIFIED]
+  ✓ /database_backup.sql → 403 Real 403 + 5 bypasses [VERIFIED] [5 BYPASSES]
+  ✓ /.htaccess.old → 403 Real 403 (protected) [UNVERIFIED]
+
+[9/9] Security Report Summary
+  ...
 ```
+
+### Sigle nell'Endpoint Discovery
+
+Durante la fase di Endpoint Discovery ogni risultato 403 viene annotato con
+una o più sigle che descrivono lo stato della verifica e l'esito dei bypass:
+
+| Sigla | Colore | Significato |
+|---|---|---|
+| `[VERIFIED]` | verde | Il 403 è **genuino e specifico**. WENDY ha confermato che un URL casuale simile (`/mysql.sql-a7f3kx9`) restituisce 404 → il server protegge quel file in modo mirato |
+| `[UNVERIFIED]` | giallo | Il 403 è **probabilmente reale** ma non è stato possibile confermarlo (errore di rete o risposta anomala durante la verifica). Richiede verifica manuale |
+| `[FP]` | giallo | Il 403 è un **falso positivo**: anche un URL inventato dallo stesso percorso restituisce 403 → il server blocca tutto con 403 indiscriminatamente (WAF/regola globale). Il file potrebbe non esistere |
+| `(protected)` | testo normale | 403 reale, bypass tentati ma **nessuno ha funzionato**. Il file è correttamente protetto |
+| `[N BYPASSES]` | rosso | 403 reale, ma **N tecniche di bypass hanno restituito 200**. Il file è teoricamente raggiungibile aggirando il blocco. Il numero indica quante tecniche distinte hanno avuto successo |
+
+Le sigle sono **combinabili**: un endpoint può mostrare `[VERIFIED] [5 BYPASSES]`
+(verificato autentico, con 5 bypass funzionanti) oppure `[UNVERIFIED] [2 BYPASSES]`
+(bypass trovati ma verifica inconclusiva — possibile falso positivo).
 
 ---
 
@@ -214,7 +257,7 @@ wpscanner/
 ```
 
 File generati localmente (gitignored):
-- `wendy/cve_db.json` – database CVE live + indice installs (generato da `update_db.py`)
+- `wendy/cve_db.json` – database CVE live + indice installs (generato con `-u`)
 - `wendy/.keys` – configurazione API key e probe tuning
 
 ---
@@ -265,26 +308,61 @@ Gli autori declinano ogni responsabilità per usi impropri.
 ## Changelog
 
 ### v0.4.0
+- **Fix: versioni temi sempre `None`** — estratta `Version:` dall'header CSS di
+  `style.css`; il CVE matching per temi ora funziona correttamente
+- **Fix: sigla `[UNVERIFIED]`** — endpoint 403 con verifica inconclusiva
+  (errore rete/timeout) ora mostrano `[UNVERIFIED]` in giallo invece di nessuna
+  sigla; `[VERIFIED]` rimane verde, `[FP]` rimane giallo
+- **Security Headers: validazione valori** — oltre alla presenza, WENDY verifica
+  il contenuto degli header critici: CSP con `unsafe-inline`/`unsafe-eval`/
+  wildcard, HSTS con `max-age` < 31536000, X-Frame-Options non riconosciuto,
+  X-Content-Type-Options diverso da `nosniff`. Header presenti ma deboli
+  mostrano `⚠` giallo con descrizione inline del problema
+- **User Enumeration: paginazione REST + commenti** — gestione corretta di siti
+  con >100 utenti tramite `X-WP-TotalPages`; nuova Method 5 che enumera autori
+  via `/wp-json/wp/v2/comments`
+- **Nuova Phase 7 – Advanced WordPress Checks** (5 nuovi check dedicati):
+  - `check_rest_api()` — enumera namespace REST, segnala namespace custom di
+    plugin/tema, verifica `/wp-json/wp/v2/settings` per leakage unauthenticated
+    (MEDIUM)
+  - `check_wpadmin_protection()` — analizza la risposta a `wp-admin/` senza
+    seguire redirect: 301/302 verso wp-login è corretto; 200 con pannello aperto
+    è HIGH; 200 con login inline è INFO; 403/401 è hardening server (nessun
+    finding); redirect verso URL inaspettato è MEDIUM
+  - `check_login_protection()` — POST con credenziali errate (×2) su
+    `wp-login.php`; rileva CAPTCHA, lockout/throttle, 2FA, rate-limit headers
+    (tutti INFO); 403/401 a livello server è INFO positivo; assenza di qualsiasi
+    protezione è MEDIUM. Lockout verificato su entrambe le risposte (prima era
+    solo sulla prima)
+  - `check_uploads_php_execution()` — proba un `.php` inesistente in
+    `wp-content/uploads/`; 200 = PHP execution non bloccata (HIGH); 403 =
+    hardened correttamente; 404 = normale (nessun finding)
+  - `check_wp_debug()` — triggera un 404 REST su post inesistente e analizza la
+    risposta; usa due tier: strong signals (prefissi PHP esatti come
+    `<b>fatal error</b>`, `php notice:`) + regex stack trace
+    (`path.php on line N`) per evitare falsi positivi
+- **`_print_findings()`: icone per severità** — ⚠ rossa per HIGH/CRITICAL, ⚠
+  gialla per MEDIUM/LOW, ✓ verde per INFO
+- **TOTAL_PHASES** aggiornato da 8 a 9
+- **README**: sezione "Sigle nell'Endpoint Discovery"; help CLI aggiornato con
+  legenda sigle nell'epilog
+
+### v0.3.0
 - **Smart probe prioritization**: in normal mode proba i top 3 000 plugin/temi
   ordinati per score (popolarità WP.org × CVE recenti × severità CVSS)
 - **WordPress.org installs index**: durante `-u` vengono scaricati in parallelo
   i top 10 000 plugin e 500 temi per `active_installs`; memorizzati in `cve_db.json`
 - **Filtro installazioni configurabile** (`MIN_ACTIVE_INSTALLS`): esclude plugin
   troppo rari in normal mode; plugin con CVE CRITICAL recenti sono sempre inclusi
-- **Theme CVE DB**: `parse_feed()` ora include anche le vulnerabilità dei temi
-  (tipo `theme` nel feed Wordfence); lista temi probe ora dinamica (CVE + popular + baseline)
+- **Theme CVE DB**: include anche le vulnerabilità dei temi (tipo `theme` nel feed
+  Wordfence); lista temi probe ora dinamica (CVE + popular + baseline)
 - **Probe tuning via `.keys`**: tutti i limiti configurabili senza modificare il codice
   (`PROBE_NORMAL_LIMIT`, `PROBE_THEME_LIMIT`, `CVE_YEARS`, `INSTALLS_INDEX_LIMIT`)
-- **Upgrade feed Wordfence**: da v2 (pubblico, no auth) a v3 (richiede API key gratuita)
+- **Aggiornamento DB integrato** (`-u`): aggiorna CVE database e indice installazioni
+  direttamente dallo scanner; nessun script separato da eseguire manualmente
+- **Feed Wordfence v3**: richiede API key gratuita (precedentemente v2 pubblica)
 - **`config.py`**: nuovo modulo `load_probe_config()` — legge e valida i parametri
   di tuning da `.keys` / env con defaults sensati
-- **Fix code quality**: eliminato doppio lookup `INSTALLS_INDEX`, regex pre-compilata
-  (`RECENT_CVE_IDS` frozenset), set creati una sola volta nel theme probe,
-  deduplication con `dict.fromkeys`, rimosso try/except ridondante in `run_db_update`
-
-### v0.3.0
-- Aggiunto `wendy/update_db.py`: aggiornamento settimanale CVE da Wordfence
-  Intelligence v2 (pubblico, no auth)
 - Database CVE a due livelli: embedded (fallback offline) + `cve_db.json` (live)
 - Merge intelligente: deduplicazione per CVE ID, embedded ha priorità sul live
 - Fix: WPScan API response parsing (chiave top-level = slug del plugin)

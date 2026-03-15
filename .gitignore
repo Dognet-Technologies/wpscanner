@@ -5,3 +5,5 @@ endpoint_discovery/
 *.tzt
 *.png
 __pycache__/
+HISTORY.md
+.keys

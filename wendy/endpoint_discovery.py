@@ -432,8 +432,14 @@ class EndpointDiscovery:
         ]
         if self.aggressive:
             sources += [
-                ('/sitemap.xml',      r'WordPress\s+([\d.]+)'),
-                ('/wp-sitemap.xml',   r'WordPress\s+([\d.]+)'),
+                ('/sitemap.xml',                         r'WordPress\s+([\d.]+)'),
+                ('/wp-sitemap.xml',                      r'WordPress\s+([\d.]+)'),
+                ('/wp-includes/css/dashicons.min.css',   r'[?&]ver=([\d.]+)'),
+                ('/wp-admin/load-scripts.php',           r'[?&]ver=([\d.]+)'),
+                ('/?p=1',                                r'<meta[^>]+generator[^>]+WordPress\s+([\d.]+)'),
+                ('/wp-trackback.php',                    r'WordPress/([\d.]+)'),
+                ('/wp-links-opml.php',                   r'generator="WordPress/([\d.]+)"'),
+                ('/wp-app.php',                          r'WordPress/([\d.]+)'),
             ]
 
         for path, pattern in sources:
@@ -607,10 +613,24 @@ class EndpointDiscovery:
         # Priority: (1) theme CVE slugs from Wordfence, (2) popular from WP.org,
         # (3) hardcoded baseline fallback (always included as safety net).
         _baseline_themes = [
-            'twentytwentyfour','twentytwentythree','twentytwentytwo',
-            'divi','avada','astra','hello-elementor','neve','generatepress',
-            'flatsome','storefront','oceanwp','enfold','bridge','salient',
-            'blocksy','kadence',
+            # Default WP themes
+            'twentytwentyfive','twentytwentyfour','twentytwentythree','twentytwentytwo',
+            'twentytwentyone','twentytwenty','twentynineteen','twentyeighteen',
+            'twentyseventeen','twentysixteen','twentyfifteen','twentyfourteen',
+            'twentythirteen','twentytwelve','twentyeleven','twentyten',
+            # Top commercial
+            'divi','avada','flatsome','enfold','bridge','salient','betheme',
+            'jupiter','woodmart','porto','electro','thrive-themes','newspaper',
+            'jnews','soledad','newsmag','publisher','magazine-pro',
+            # Top free/freemium
+            'astra','hello-elementor','neve','generatepress','blocksy','kadence',
+            'storefront','oceanwp','hestia','zakra','colibri-wp','botiga',
+            'sydney','hueman','virtue','spacious','zerif-lite','layers',
+            'customify','primer','gridlove','accesspress-basic','catch-base',
+            # Page-builder specific
+            'bricks','phlox','largo','llorix-one','allegiant',
+            # WooCommerce-focused
+            'shoptimizer','genesis','child-of-light',
         ]
         _theme_cve_slugs = list(EFFECTIVE_THEME_CVE_DB.keys())
         _theme_cve_set   = set(_theme_cve_slugs)
@@ -621,7 +641,9 @@ class EndpointDiscovery:
 
         if self.aggressive:
             theme_probe = _theme_cve_slugs + _theme_popular + _theme_baseline + [
-                'betheme','jupiter','woodmart','porto','electro','thrive-themes',
+                'divi-child','avada-child','newspaper-child','brooklyn','kalium',
+                'impreza','the7','total','uncode','x','supreme','district',
+                'movedo','sugar','stockholm','monstroid2','ivy','smart',
             ]
         else:
             # Fill up to NORMAL_MODE_THEME_LIMIT with CVE themes then popular themes,
@@ -825,7 +847,12 @@ class EndpointDiscovery:
 
         # Method 4: Login page error differentiation (common usernames only in aggressive)
         if self.aggressive:
-            test_users = ['admin', 'administrator', 'webmaster', 'editor', 'user', 'test']
+            test_users = [
+                'admin', 'administrator', 'webmaster', 'editor', 'user', 'test',
+                'wordpress', 'support', 'manager', 'author', 'demo', 'guest',
+                'operator', 'info', 'contact', 'wp', 'service', 'backup',
+                'dev', 'staging', 'root', 'superadmin', 'sysadmin',
+            ]
             login_url  = f"{base_url.rstrip('/')}/wp-login.php"
             for uname in test_users:
                 try:
@@ -920,32 +947,87 @@ class EndpointDiscovery:
         findings = []
 
         checks = [
-            # (path, expected_bad_status, check_fn, severity, title, desc)
-            ('/readme.html',            lambda r: r.status_code == 200,
+            # (path, check_fn, severity, title, desc)
+            ('/readme.html',
+             lambda r: r.status_code == 200,
              'MEDIUM', 'readme.html exposed', 'WordPress version disclosed via readme.html'),
+            ('/license.txt',
+             lambda r: r.status_code == 200 and 'wordpress' in r.text.lower(),
+             'INFO', 'license.txt exposed', 'WordPress license.txt discloses CMS identity'),
             # wp-cron: 200 with empty body is normal WP behaviour (cron fired with no output)
-            ('/wp-cron.php',            lambda r: r.status_code == 200 and len(r.text.strip()) > 0,
+            ('/wp-cron.php',
+             lambda r: r.status_code == 200 and len(r.text.strip()) > 0,
              'MEDIUM', 'wp-cron.php public', 'wp-cron.php accessible anonymously - DoS/amplification risk'),
             # install.php: only a real risk when WP is NOT already installed
             ('/wp-admin/install.php',
              lambda r: r.status_code == 200 and 'already installed' not in r.text.lower(),
-             'HIGH',   'install.php accessible', 'WordPress install script accessible - may allow site reset'),
+             'HIGH', 'install.php accessible', 'WordPress install script accessible - may allow site reset'),
             # upgrade.php: only a risk when an actual upgrade is needed
             ('/wp-admin/upgrade.php',
              lambda r: r.status_code == 200 and 'no update' not in r.text.lower()
                        and 'già aggiornato' not in r.text.lower()
                        and 'already up to date' not in r.text.lower(),
              'MEDIUM', 'upgrade.php accessible', 'Database upgrade script publicly reachable'),
-            ('/wp-content/debug.log',   lambda r: r.status_code == 200 and len(r.text) > 10,
-             'HIGH',   'debug.log exposed', 'WordPress debug log publicly accessible - potential data leak'),
-            ('/wp-config.php',          lambda r: r.status_code == 200 and 'DB_PASSWORD' in r.text,
-             'CRITICAL','wp-config.php readable', 'wp-config.php is publicly readable - credentials exposed'),
-            ('/wp-signup.php',          lambda r: r.status_code == 200 and 'signup' in r.text.lower(),
-             'LOW',    'Multisite signup open', 'WordPress multisite user signup is enabled'),
-            ('/.git/HEAD',              lambda r: r.status_code == 200 and 'ref:' in r.text,
-             'HIGH',   '.git directory exposed', '.git repository exposed - source code and secrets accessible'),
-            ('/.env',                   lambda r: r.status_code == 200 and len(r.text) > 5,
-             'CRITICAL','.env exposed', '.env file publicly readable - credentials/keys exposed'),
+            ('/wp-content/debug.log',
+             lambda r: r.status_code == 200 and len(r.text) > 10,
+             'HIGH', 'debug.log exposed', 'WordPress debug log publicly accessible - potential data leak'),
+            ('/wp-config.php',
+             lambda r: r.status_code == 200 and 'DB_PASSWORD' in r.text,
+             'CRITICAL', 'wp-config.php readable', 'wp-config.php is publicly readable - credentials exposed'),
+            ('/wp-signup.php',
+             lambda r: r.status_code == 200 and 'signup' in r.text.lower(),
+             'LOW', 'Multisite signup open', 'WordPress multisite user signup is enabled'),
+            ('/.git/HEAD',
+             lambda r: r.status_code == 200 and 'ref:' in r.text,
+             'HIGH', '.git directory exposed', '.git repository exposed - source code and secrets accessible'),
+            ('/.git/config',
+             lambda r: r.status_code == 200 and '[core]' in r.text,
+             'HIGH', '.git/config exposed', '.git/config readable - remote URL and credentials may be exposed'),
+            ('/.env',
+             lambda r: r.status_code == 200 and len(r.text) > 5,
+             'CRITICAL', '.env exposed', '.env file publicly readable - credentials/keys exposed'),
+            ('/.htpasswd',
+             lambda r: r.status_code == 200 and len(r.text) > 5,
+             'CRITICAL', '.htpasswd exposed', '.htpasswd with password hashes publicly readable'),
+            ('/wp-content/uploads/.htaccess',
+             lambda r: r.status_code == 200 and len(r.text) > 5,
+             'LOW', 'uploads .htaccess readable', '.htaccess in uploads directory is publicly readable'),
+            ('/phpinfo.php',
+             lambda r: r.status_code == 200 and 'phpinfo' in r.text.lower(),
+             'HIGH', 'phpinfo.php exposed', 'phpinfo() page leaks PHP version, server config, and env variables'),
+            ('/info.php',
+             lambda r: r.status_code == 200 and 'phpinfo' in r.text.lower(),
+             'HIGH', 'info.php exposed', 'phpinfo() page leaks PHP version, server config, and env variables'),
+            ('/wp-admin/setup-config.php',
+             lambda r: r.status_code == 200 and 'setup' in r.text.lower(),
+             'HIGH', 'setup-config.php accessible', 'WordPress setup script accessible - DB config may be overwritten'),
+            ('/.DS_Store',
+             lambda r: r.status_code == 200 and len(r.content) > 5,
+             'LOW', '.DS_Store exposed', '.DS_Store file leaks directory structure (macOS artifact)'),
+            ('/server-status',
+             lambda r: r.status_code == 200 and ('apache' in r.text.lower() or 'server status' in r.text.lower()),
+             'MEDIUM', 'Apache server-status exposed', 'Apache mod_status leaks live request details and internal IPs'),
+            ('/server-info',
+             lambda r: r.status_code == 200 and 'apache' in r.text.lower(),
+             'MEDIUM', 'Apache server-info exposed', 'Apache mod_info leaks server configuration details'),
+            ('/crossdomain.xml',
+             lambda r: r.status_code == 200 and 'allow-access-from' in r.text.lower(),
+             'MEDIUM', 'crossdomain.xml permissive', 'Permissive crossdomain.xml allows cross-origin Flash/PDF access'),
+            ('/xmlrpc.php',
+             lambda r: r.status_code == 200 and 'xml' in r.text.lower(),
+             'MEDIUM', 'XML-RPC enabled', 'XML-RPC endpoint active - brute-force and SSRF risk'),
+            ('/wp-json/wp/v2/users',
+             lambda r: r.status_code == 200 and '"slug"' in r.text,
+             'MEDIUM', 'REST API users public', 'Unauthenticated REST API exposes user list'),
+            ('/wp-content/uploads/',
+             lambda r: r.status_code == 200 and ('index of' in r.text.lower() or '<a href=' in r.text.lower()),
+             'MEDIUM', 'Uploads directory listable', 'wp-content/uploads/ directory listing is enabled'),
+            ('/wp-content/plugins/',
+             lambda r: r.status_code == 200 and ('index of' in r.text.lower() or '<a href=' in r.text.lower()),
+             'LOW', 'Plugins directory listable', 'wp-content/plugins/ directory listing is enabled'),
+            ('/wp-includes/',
+             lambda r: r.status_code == 200 and ('index of' in r.text.lower() or '<a href=' in r.text.lower()),
+             'LOW', 'wp-includes directory listable', 'wp-includes/ directory listing is enabled'),
         ]
 
         # Check user registration
@@ -995,9 +1077,17 @@ class EndpointDiscovery:
         non_html_extensions = [
             '.log','.txt','.sql','.zip','.tar','.gz','.bak','.old',
             '.conf','.cfg','.ini','.env','.json','.xml','.yml','.yaml',
-            '.php','.py','.rb','.pl','.sh','.bash','.zsh',
-            '.key','.pem','.crt','.cer','.pub','.ppk',
-            '.db','.sqlite','.sqlite3','.mdb','.csv',
+            '.php','.py','.rb','.pl','.sh','.bash','.zsh','.fish',
+            '.key','.pem','.crt','.cer','.pub','.ppk','.p12','.pfx','.jks',
+            '.db','.sqlite','.sqlite3','.mdb','.csv','.tsv',
+            '.7z','.rar','.tgz','.bz2','.xz','.lz','.lzma',
+            '.dump','.dmp','.bson','.rdb',
+            '.htpasswd','.htaccess',
+            '.swp','.swo','.orig','.backup','.copy','.disabled',
+            '.sample','.tmp','.temp','.cache',
+            '.gpg','.asc','.sig',
+            '.war','.jar','.class','.pyc','.pyo',
+            '.DS_Store','.gitignore','.gitmodules',
         ]
         endpoint_lower = endpoint.lower()
         has_non_html_ext = any(endpoint_lower.endswith(ext) for ext in non_html_extensions)
@@ -1342,21 +1432,43 @@ class EndpointDiscovery:
 
     def get_backup_endpoints(self, base_url):
         common = [
+            # wp-config variants
             '/wp-config.php.bak','/wp-config.php~','/wp-config.php.save','/wp-config.php.old',
-            '/wp-config.php.orig','/.wp-config.php.swp','/wp-config.bak','/backup.zip',
-            '/backup.sql','/backup.tar.gz','/database.sql','/db_backup.sql','/wp_backup.sql',
-            '/site_backup.zip','/wordpress_backup.zip','/.htaccess.bak','/.htaccess~',
-            '/wp-config.php.backup','/wp-config.php.bkp','/wp-config.php.copy',
-            '/wp-config.php.disabled','/wp-config.php.tmp','/wp-config.php.txt',
-            '/wp-config.php.zip','/wp-config.php.tar.gz','/wp-config.bkp','/wp-config.old',
-            '/db.sql','/database_backup.sql','/backup-db.sql','/wp.sql','/wordpress.sql',
-            '/wordpress.sql.gz','/database.sql.gz','/site.zip','/site.tar.gz',
-            '/website.zip','/website_backup.zip','/public_html.zip','/www.zip',
-            '/html.zip','/.htaccess.old','/.htaccess.save','/.htaccess.bkp',
-            '/wp-content/backup-db','/dump.sql','/mysql.sql','/sql.zip',
-            '/data.sql','/db.zip','/db.tar.gz','/backup.rar','/backup.7z',
+            '/wp-config.php.orig','/wp-config.php.backup','/wp-config.php.bkp',
+            '/wp-config.php.copy','/wp-config.php.disabled','/wp-config.php.tmp',
+            '/wp-config.php.txt','/wp-config.php.zip','/wp-config.php.tar.gz',
+            '/wp-config.php.1','/wp-config.php.2',
+            '/.wp-config.php.swp','/.wp-config.php.swo',
+            '/wp-config.bak','/wp-config.bkp','/wp-config.old',
+            '/wp-config-local.php','/wp-config-backup.php',
+            # .htaccess variants
+            '/.htaccess.bak','/.htaccess~','/.htaccess.old',
+            '/.htaccess.save','/.htaccess.bkp','/.htaccess.orig',
+            '/.htaccess.txt','/.htaccess.backup',
+            # SQL dumps
+            '/backup.sql','/database.sql','/db_backup.sql','/wp_backup.sql',
+            '/backup-db.sql','/dump.sql','/mysql.sql','/db.sql',
+            '/data.sql','/wordpress.sql','/wp-old.sql','/database_backup.sql',
+            '/site.sql','/export.sql','/schema.sql','/tables.sql',
+            '/wordpress.sql.gz','/database.sql.gz','/db.sql.gz','/dump.sql.gz',
+            # ZIP/archive backups
+            '/backup.zip','/backup.tar.gz','/backup.rar','/backup.7z',
+            '/site_backup.zip','/site.zip','/site.tar.gz',
+            '/wordpress_backup.zip','/wordpress.zip','/wordpress.tar.gz',
+            '/website.zip','/website_backup.zip','/website.tar.gz',
+            '/public_html.zip','/www.zip','/html.zip',
             '/all.zip','/archive.zip','/full.zip','/master.zip',
+            '/old.zip','/monthly.zip','/weekly.zip','/daily.zip',
+            '/db.zip','/db.tar.gz','/sql.zip',
+            # wp-content backups
+            '/wp-content/backup-db','/wp-content/backup-db/',
+            '/wp-content/backups/','/wp-content/backup/',
+            '/wp-content/uploads/backup.zip','/wp-content/uploads/backup.sql',
+            '/wp-content/uploads/site.zip','/wp-content/uploads/database.sql',
             '/wp-content/debug.log.bak','/wp-content/debug.log.old',
+            # Generic backup dirs
+            '/backup/','/backups/','/bkp/','/bak/',
+            '/_backup/','/_bkp/','/_old/','/old/',
         ]
         now = datetime.datetime.now()
         dates = [now.strftime("%Y"), now.strftime("%Y-%m"), now.strftime("%Y%m%d"),
@@ -1370,116 +1482,358 @@ class EndpointDiscovery:
 
     def get_config_endpoints(self, base_url):
         return [
-            '/wp-config.php','/wp-config-sample.php','/wp-config.php~','/wp-config.php.bak',
-            '/wp-config.php.old','/.env','/.env.local','/.env.production','/.env.dev',
-            '/.env.prod','/.env.stage','/.env.staging','/.env.test','/.env.backup',
-            '/.env.bak','/.env.old','/config.php','/config.inc.php','/local-config.php',
+            # WordPress core config
+            '/wp-config.php','/wp-config-sample.php','/wp-config-local.php',
+            '/wp-config.php~','/wp-config.php.bak','/wp-config.php.old',
+            '/wp-config.inc.php','/wp-config.backup.php',
+            # .env variants
+            '/.env','/.env.local','/.env.production','/.env.dev','/.env.prod',
+            '/.env.stage','/.env.staging','/.env.test','/.env.backup',
+            '/.env.bak','/.env.old','/.env.example','/.env.sample',
+            '/.env.template','/.env.default','/.env.php','/.env.dist',
+            '/backup.env','/db.env','/app.env',
+            # PHP config files
+            '/config.php','/config.inc.php','/local-config.php','/local.php',
             '/settings.php','/settings.local.php','/configuration.php',
-            '/parameters.yml','/parameters.yaml','/services.yml','/config.json',
-            '/app.json','/appsettings.json','/composer.json','/package.json',
-            '/firebase.json','/credentials.json','/.git/config','/.git/HEAD',
-            '/.git/index','/.git/logs/HEAD','/.gitmodules','/.gitignore',
-            '/web.config','/server.xml','/.htpasswd','/php.ini','/.user.ini',
-            '/nginx.conf','/.vscode/settings.json','/.dockerignore','/Dockerfile',
-            '/docker-compose.yml','/Procfile','/runtime.txt','/requirements.txt',
+            '/database.php','/db.php','/connect.php','/connection.php',
+            '/credentials.php','/secrets.php','/globals.php',
+            # Framework configs
+            '/parameters.yml','/parameters.yaml','/services.yml','/services.yaml',
+            '/config.json','/config.yml','/config.yaml',
+            '/app.json','/appsettings.json','/appsettings.development.json',
+            '/composer.json','/composer.lock','/package.json','/package-lock.json',
+            '/yarn.lock','/Gemfile','/Gemfile.lock','/Pipfile','/Pipfile.lock',
+            # Cloud/infra configs
+            '/firebase.json','/credentials.json','/.boto',
+            '/terraform.tfvars','/terraform.tfstate','/.terraform/terraform.tfstate',
+            '/serverless.yml','/serverless.yaml','/ansible.cfg',
+            '/kubernetes.yml','/helm/values.yaml','/Chart.yaml',
+            '/.travis.yml','/.circleci/config.yml','/Jenkinsfile',
+            '/circle.yml','/.github/workflows/',
+            # Git metadata
+            '/.git/config','/.git/HEAD','/.git/index','/.git/COMMIT_EDITMSG',
+            '/.git/logs/HEAD','/.git/packed-refs','/.git/refs/heads/',
+            '/.gitmodules','/.gitignore','/.git-credentials','/.gitattributes',
+            # Web server configs
+            '/web.config','/server.xml','/.htpasswd','/.htaccess',
+            '/php.ini','/.user.ini','/nginx.conf','/nginx.conf.bak',
+            '/apache.conf','/httpd.conf',
+            # IDE/editor
+            '/.vscode/settings.json','/.vscode/launch.json',
+            '/.idea/workspace.xml','/.idea/dataSources.xml',
+            # Container
+            '/.dockerignore','/Dockerfile','/docker-compose.yml',
+            '/docker-compose.yaml','/docker-compose.override.yml',
+            '/.dockercfg','/.docker/config.json',
+            # Runtime/deploy
+            '/Procfile','/runtime.txt','/requirements.txt','/setup.py',
+            '/manage.py','/artisan','/wp-cli.yml',
         ]
 
     def get_log_endpoints(self, base_url):
         return [
-            '/debug.log','/error.log','/access.log','/wp-content/debug.log',
-            '/wp-content/uploads/debug.log','/wp-content/cache/debug.log',
-            '/wp-content/logs/debug.log','/wp-content/logs/error.log',
-            '/wp-content/logs/access.log','/logs/debug.log','/logs/error.log',
-            '/logs/access.log','/log/error.log','/log/access.log',
-            '/error_log','/access_log','/wp-admin/error.log',
-            '/application.log','/system.log','/php_errors.log',
-            '/php_error.log','/php.log','/mysql.log','/mysqld.log',
+            # WordPress core logs
+            '/wp-content/debug.log','/wp-content/error.log',
+            '/wp-content/logs/','/wp-content/logs/debug.log',
+            '/wp-content/logs/error.log','/wp-content/logs/access.log',
+            '/wp-content/uploads/debug.log','/wp-content/uploads/error.log',
+            '/wp-content/uploads/error_log','/wp-content/uploads/php_errors.log',
+            '/wp-content/cache/debug.log',
+            '/wp-content/wflogs/','/wp-content/wflogs/attack-data.php',
+            '/wp-admin/error.log',
+            # Plugin-specific logs
             '/wp-content/uploads/wc-logs/','/wp-content/uploads/wc-logs/error.log',
+            '/wp-content/uploads/gravity_forms/',
+            '/wp-content/uploads/ninja-forms/',
+            '/wp-content/uploads/wp-mail-smtp/',
+            '/wp-content/uploads/updraftplus/',
+            '/wp-content/plugins/wordfence/tmp/',
+            # Generic web server logs
+            '/debug.log','/error.log','/access.log',
+            '/error_log','/access_log',
+            '/logs/','/logs/debug.log','/logs/error.log',
+            '/logs/access.log','/logs/app.log',
+            '/log/','/log/error.log','/log/access.log','/log/debug.log',
+            # Application logs
+            '/application.log','/app.log','/system.log',
+            '/laravel.log','/storage/logs/laravel.log','/storage/logs/',
+            # PHP error logs
+            '/php_errors.log','/php_error.log','/php.log',
+            '/php-errors.log','/phperror.log',
+            # DB logs
+            '/mysql.log','/mysqld.log','/mysql-error.log',
+            '/mysql-slow.log','/mariadb.log',
         ]
 
     def get_directory_endpoints(self, base_url):
         return [
+            # wp-content subdirs
             '/wp-content/','/wp-content/uploads/','/wp-content/themes/',
-            '/wp-content/plugins/','/wp-content/cache/','/wp-content/backups/',
-            '/wp-content/backup/','/wp-content/upgrade/','/wp-content/temp/',
-            '/wp-content/tmp/','/wp-content/logs/','/wp-content/uploads/backups/',
-            '/wp-content/uploads/tmp/','/wp-content/uploads/logs/',
-            '/wp-admin/','/wp-includes/','/uploads/','/images/',
-            '/files/','/documents/','/backup/','/backups/','/temp/',
-            '/tmp/','/cache/','/logs/','/assets/','/media/','/downloads/',
-            '/private/','/old/','/staging/','/test/','/dev/',
+            '/wp-content/plugins/','/wp-content/mu-plugins/',
+            '/wp-content/cache/','/wp-content/backups/','/wp-content/backup/',
+            '/wp-content/upgrade/','/wp-content/temp/','/wp-content/tmp/',
+            '/wp-content/logs/','/wp-content/languages/','/wp-content/fonts/',
+            '/wp-content/wflogs/','/wp-content/et-cache/',
+            '/wp-content/ngg/','/wp-content/gallery/',
+            '/wp-content/uploads/backups/','/wp-content/uploads/tmp/',
+            '/wp-content/uploads/logs/','/wp-content/uploads/cache/',
+            '/wp-content/uploads/elementor/','/wp-content/uploads/revslider/',
+            '/wp-content/uploads/gravity_forms/','/wp-content/uploads/ninja-forms/',
+            '/wp-content/uploads/updraftplus/','/wp-content/uploads/wc-logs/',
+            '/wp-content/uploads/wp-mail-smtp/','/wp-content/uploads/bbpress/',
+            # WP core dirs
+            '/wp-admin/','/wp-admin/css/','/wp-admin/js/','/wp-admin/images/',
+            '/wp-admin/network/','/wp-admin/user/',
+            '/wp-includes/','/wp-includes/js/','/wp-includes/css/',
+            '/wp-includes/images/','/wp-includes/fonts/',
+            # Common web dirs
+            '/uploads/','/images/','/files/','/documents/','/assets/',
+            '/media/','/downloads/','/static/','/public/',
+            '/css/','/js/','/fonts/','/img/','/src/',
+            # Sensitive/operational dirs
+            '/backup/','/backups/','/bkp/','/bak/','/old/',
+            '/temp/','/tmp/','/cache/','/logs/','/log/',
+            '/private/','/secure/','/internal/','/admin/',
+            '/staging/','/test/','/dev/','/development/','/prod/',
+            # Common web panels (fingerprinting)
+            '/phpmyadmin/','/phpMyAdmin/','/pma/','/adminer/',
+            '/cpanel/','/webmail/','/panel/','/console/',
+            '/api/','/v1/','/v2/','/v3/',
+            '/.well-known/',
         ]
 
     def get_ajax_endpoints(self, base_url):
         return [
+            # Core admin-ajax
             '/wp-admin/admin-ajax.php',
             '/wp-admin/admin-ajax.php?action=heartbeat',
             '/wp-admin/admin-ajax.php?action=wp_compression_test',
             '/wp-admin/admin-ajax.php?action=fetch-list',
             '/wp-admin/admin-ajax.php?action=ajax-tag-search',
-            '/wp-json/','/wp-json/wp/v2/','/wp-json/wp/v2/users',
-            '/wp-json/wp/v2/posts','/wp-json/wp/v2/pages',
-            '/wp-json/wp/v2/media','/wp-json/wp/v2/comments',
-            '/wp-json/wp/v2/settings','/wp-json/wp/v2/themes',
-            '/wp-json/wp/v2/plugins','/wp-json/wp/v2/search',
-            '/wp-json/oembed/1.0/embed','/?rest_route=/',
-            '/?rest_route=/wp/v2/users','/?rest_route=/wp/v2/posts',
+            '/wp-admin/admin-ajax.php?action=query-attachments',
+            '/wp-admin/admin-ajax.php?action=save-attachment',
+            '/wp-admin/admin-ajax.php?action=get-comments',
+            '/wp-admin/admin-ajax.php?action=wp-remove-post-lock',
+            # Plugin-specific AJAX
+            '/wp-admin/admin-ajax.php?action=elementor_ajax',
+            '/wp-admin/admin-ajax.php?action=nopriv_woocommerce_get_refreshed_fragments',
+            '/wp-admin/admin-ajax.php?action=woocommerce_get_refreshed_fragments',
+            '/wp-admin/admin-ajax.php?action=cf7_upload_file',
+            '/wp-admin/admin-ajax.php?action=duplicator_package_scan',
+            '/wp-admin/admin-ajax.php?action=revslider_ajax_action',
+            '/wp-admin/admin-ajax.php?action=vc_get_vc_grid_data',
+            # WooCommerce frontend ajax
+            '/?wc-ajax=get_refreshed_fragments',
+            '/?wc-ajax=apply_coupon',
+            '/?wc-ajax=checkout',
+            '/?wc-ajax=add_to_cart',
+            '/?wc-ajax=remove_from_cart',
+            # REST API - core
+            '/wp-json/','/wp-json/wp/v2/',
+            '/wp-json/wp/v2/users','/wp-json/wp/v2/posts',
+            '/wp-json/wp/v2/pages','/wp-json/wp/v2/media',
+            '/wp-json/wp/v2/comments','/wp-json/wp/v2/settings',
+            '/wp-json/wp/v2/themes','/wp-json/wp/v2/plugins',
+            '/wp-json/wp/v2/search','/wp-json/wp/v2/categories',
+            '/wp-json/wp/v2/tags','/wp-json/wp/v2/taxonomies',
+            '/wp-json/wp/v2/types','/wp-json/wp/v2/statuses',
+            '/wp-json/wp/v2/block-types','/wp-json/wp/v2/templates',
+            '/wp-json/wp/v2/blocks','/wp-json/wp/v2/global-styles/',
+            '/wp-json/wp/v2/sidebars','/wp-json/wp/v2/widgets',
+            '/wp-json/oembed/1.0/embed','/wp-json/oembed/1.0/',
+            # REST API - plugins
+            '/wp-json/contact-form-7/v1/',
+            '/wp-json/woocommerce/v3/','/wp-json/woocommerce/v2/',
+            '/wp-json/yoast/v1/','/wp-json/rank-math/v1/',
+            '/wp-json/jetpack/v4/',
+            '/wp-json/acf/v3/',
+            # REST fallback routes
+            '/?rest_route=/',
+            '/?rest_route=/wp/v2/users',
+            '/?rest_route=/wp/v2/posts',
+            '/?rest_route=/wp/v2/pages',
         ]
 
     def get_api_endpoints(self, base_url):
         return [
-            '/api/','/api/v1/','/api/v2/','/graphql','/graphql/',
-            '/rest/','/rest/v1/','/wp-json/','/wp-json/wp/v2/',
-            '/feed/','/feed/rss/','/feed/atom/','/rss/','/rss.xml',
-            '/atom/','/atom.xml','/sitemap.xml','/sitemap_index.xml',
-            '/wp-sitemap.xml','/robots.txt','/.well-known/',
-            '/.well-known/security.txt','/.well-known/change-password',
-            '/security.txt','/humans.txt','/ads.txt','/crossdomain.xml',
+            # Generic APIs
+            '/api/','/api/v1/','/api/v2/','/api/v3/',
+            '/graphql','/graphql/','/graphiql',
+            '/rest/','/rest/v1/','/rest/v2/',
+            # WordPress feeds
+            '/feed/','/feed/rss/','/feed/rss2/','/feed/atom/',
+            '/feed/rdf/','/comments/feed/',
+            '/rss/','/rss.xml','/rss2.xml',
+            '/atom/','/atom.xml',
+            # Sitemaps
+            '/sitemap.xml','/sitemap_index.xml','/wp-sitemap.xml',
+            '/sitemap-1.xml','/sitemap-posts-post-1.xml',
+            '/sitemap-pages-1.xml','/news-sitemap.xml',
+            '/video-sitemap.xml','/image-sitemap.xml',
+            # Discovery files
+            '/robots.txt','/humans.txt','/ads.txt','/app-ads.txt',
+            '/security.txt','/.well-known/security.txt',
+            '/.well-known/change-password','/.well-known/',
+            '/.well-known/openid-configuration',
+            '/.well-known/oauth-authorization-server',
+            # Browser/platform
+            '/manifest.json','/manifest.webmanifest',
+            '/browserconfig.xml','/crossdomain.xml',
+            '/favicon.ico','/apple-touch-icon.png',
+            # WordPress special endpoints
+            '/wp-comments-post.php','/wp-trackback.php',
+            '/wp-links-opml.php','/wp-app.php',
+            '/xmlrpc.php',
+            # Author enumeration via URL
+            '/?author=1','/?author=2','/?author=3',
+            # oEmbed
+            '/wp-json/oembed/1.0/embed','/oembed/',
+            '/?oembed=1',
         ]
 
     def get_cache_endpoints(self, base_url):
         return [
-            '/wp-content/cache/','/wp-content/wp-cache-config.php',
+            # WP drop-in cache files
             '/wp-content/advanced-cache.php','/wp-content/object-cache.php',
-            '/wp-content/w3tc-config/','/wp-content/cache/supercache/',
-            '/wp-content/cache/wp-rocket/','/wp-content/cache/min/',
-            '/wp-content/cache/litespeed/','/wp-content/cache/lscache/',
-            '/wp-content/cache/autoptimize/','/wp-content/cache/breeze/',
-            '/wp-content/cache/wpo/','/wp-content/cache/wp-fastest-cache/',
-            '/wp-content/cache/w3-total-cache/','/cache/','/tmp/cache/',
-            '/wp-content/plugins/wp-super-cache/','/wp-content/uploads/cache/',
-            '/.cache/',
+            '/wp-content/wp-cache-config.php',
+            # Cache plugin directories
+            '/wp-content/cache/',
+            '/wp-content/cache/supercache/',          # WP Super Cache
+            '/wp-content/cache/wp-rocket/',           # WP Rocket
+            '/wp-content/cache/wp-rocket/config/',
+            '/wp-content/cache/min/',                 # WP Rocket / Autoptimize
+            '/wp-content/cache/litespeed/',           # LiteSpeed Cache
+            '/wp-content/cache/lscache/',
+            '/wp-content/cache/autoptimize/',         # Autoptimize
+            '/wp-content/cache/breeze/',              # Breeze (Cloudways)
+            '/wp-content/cache/wpo/',                 # WP Optimize
+            '/wp-content/cache/wp-fastest-cache/',    # WP Fastest Cache
+            '/wp-content/cache/w3-total-cache/',      # W3 Total Cache
+            '/wp-content/w3tc-config/',
+            '/wp-content/cache/hummingbird/',         # Hummingbird
+            '/wp-content/cache/sg-optimizer/',        # SG Optimizer
+            '/wp-content/cache/comet-cache/',         # Comet Cache
+            '/wp-content/cache/swift-performance/',   # Swift Performance
+            '/wp-content/cache/cache-enabler/',       # Cache Enabler
+            '/wp-content/cache/flying-press/',        # FlyingPress
+            '/wp-content/cache/rapidload/',           # RapidLoad
+            '/wp-content/et-cache/',                  # Divi ET cache
+            '/wp-content/uploads/cache/',
+            # Generic cache dirs
+            '/cache/','/tmp/cache/','/.cache/',
+            '/wp-content/plugins/wp-super-cache/',
         ]
 
     def get_debug_endpoints(self, base_url):
         return [
-            '/wp-content/debug.log','/phpinfo.php','/info.php','/test.php',
-            '/debug.php','/status.php','/health.php','/version.php',
-            '/wp-admin/maint/repair.php','/wp-admin/setup-config.php',
-            '/wp-admin/install.php','/wp-content/uploads/debug.log',
-            '/wp-content/uploads/error.log','/wp-content/uploads/php_errors.log',
-            '/wp-content/uploads/logs/','/wp-content/logs/',
+            # WordPress admin scripts
+            '/wp-admin/install.php','/wp-admin/upgrade.php',
+            '/wp-admin/setup-config.php','/wp-admin/maint/repair.php',
+            '/wp-admin/admin-post.php','/wp-admin/async-upload.php',
+            '/wp-login.php?action=lostpassword',
+            # PHP info/debug pages
+            '/phpinfo.php','/info.php','/php.php','/php_info.php',
+            '/test.php','/debug.php','/status.php','/health.php',
+            '/version.php','/env.php','/server.php','/check.php',
+            '/ping.php','/pong.php','/alive.php','/ready.php','/ok.php',
+            '/xdebug.php','/trace.php','/dump.php','/staging.php',
+            '/dev.php','/local.php','/test.html',
+            # WP debug logs
+            '/wp-content/debug.log','/wp-content/logs/',
             '/wp-content/tmp/','/wp-content/test/',
-            '/php_error.log','/error_log','/xdebug.php',
-            '/trace.php','/dump.php','/wp-admin/upgrade.php',
+            '/wp-content/uploads/debug.log','/wp-content/uploads/error.log',
+            '/wp-content/uploads/error_log','/wp-content/uploads/php_errors.log',
+            '/wp-content/uploads/logs/',
+            # PHP error logs
+            '/php_error.log','/php_errors.log','/error_log',
+            # Framework debug/profiling
+            '/_profiler/','/_wdt/',
+            '/telescope','/telescope/requests',
+            '/horizon','/horizon/api/',
+            '/nova-api/',
+            '/actuator','/actuator/health','/actuator/env','/actuator/info',
+            '/actuator/metrics','/actuator/beans',
+            '/__clockwork/','/__clockwork/latest',
+            '/clockwork/',
+            '/api/debug','/api/health','/api/status',
+            '/_ah/health','/_ah/ready',  # Google App Engine
         ]
 
     def get_plugin_specific_endpoints(self, base_url):
         plugins = [
-            'royal-elementor-addons','elementor','elementor-pro',
-            'ewww-image-optimizer','wp-fastest-cache','litespeed-cache',
-            'wordfence','the-events-calendar','complianz-gdpr','duplicate-page',
-            'contact-form-7','wp-file-manager','woocommerce','jetpack',
-            'all-in-one-seo-pack','yoast-seo','wpforms','akismet',
-            'updraftplus','monsterinsights','advanced-custom-fields',
-            'revslider','js_composer','gravityforms','duplicator',
-            'backupbuddy','wp-migrate-db','wp-rocket','autoptimize',
-            'w3-total-cache','all-in-one-wp-migration','wp-super-cache',
-            'ithemes-security','sucuri-scanner','ninja-forms',
-            'mailchimp-for-wp','smush','broken-link-checker','redirection',
-            'tablepress','query-monitor','mainwp','wp01',
-            'woocommerce-payments','loginizer','really-simple-ssl',
-            'wp-statistics','broken-link-checker','wp-mail-smtp',
+            # Page builders
+            'elementor','elementor-pro','royal-elementor-addons',
+            'js_composer','beaver-builder','beaver-builder-lite-version',
+            'siteorigin-panels','kingcomposer','fusion-builder',
+            'thrive-architect','oxygen','bricks','divi-builder',
+            'visual-composer','wp-page-builder','brizy',
+            # Elementor addons
+            'essential-addons-for-elementor','happy-elementor-addons',
+            'premium-addons-for-elementor','ultimate-addons-for-elementor',
+            'envato-elements',
+            # SEO
+            'yoast-seo','all-in-one-seo-pack','seo-by-rank-math',
+            'the-seo-framework','slim-seo','squirrly-seo',
+            # WooCommerce core + extensions
+            'woocommerce','woocommerce-payments','woocommerce-subscriptions',
+            'woo-gutenberg-products-block','woocommerce-gateway-stripe',
+            'woocommerce-paypal-payments','wc-order-export',
+            'easy-digital-downloads','woo-stripe-payment',
+            # Forms
+            'contact-form-7','wpforms','wpforms-lite','gravityforms',
+            'ninja-forms','formidable','caldera-forms','fluentform',
+            'mailchimp-for-wp',
+            # Security
+            'wordfence','ithemes-security','sucuri-scanner',
+            'all-in-one-wp-security-and-firewall','really-simple-ssl',
+            'loginizer','two-factor','wp-cerber','shield-security',
+            # Backup / Migration
+            'updraftplus','duplicator','all-in-one-wp-migration',
+            'backupbuddy','wp-migrate-db','backwpup',
+            'wp-clone-by-wp-academy','xcloner-backup-and-restore',
+            # Caching
+            'wp-super-cache','w3-total-cache','wp-rocket','autoptimize',
+            'litespeed-cache','wp-fastest-cache','sg-cachepress',
+            'hummingbird-performance','comet-cache','cache-enabler',
+            # Images / Media
+            'ewww-image-optimizer','smush','imagify','shortpixel-image-optimiser',
+            'regenerate-thumbnails','enable-media-replace',
+            # ACF / Custom Fields
+            'advanced-custom-fields','acf-pro','pods','toolset-types',
+            'meta-box','codepress-admin-columns',
+            # Multilingual
+            'wpml','polylang','translatepress-multilingual',
+            'weglot','gtranslate','loco-translate','wplingua',
+            # Analytics / Tracking
+            'google-analytics-for-wordpress','monsterinsights',
+            'google-site-kit','wp-statistics','analytify',
+            # Membership / LMS
+            'paid-memberships-pro','restrict-content-pro','memberpress',
+            'learnpress','learndash','tutor-lms','lifterlms',
+            'user-role-editor','members',
+            # Events / Booking
+            'the-events-calendar','tribe-events-calendar-pro',
+            'events-manager','bookly','amelia',
+            # Social / Marketing
+            'revslider','optinmonster','convert-pro','hustle','bloom',
+            'instagram-feed','smash-balloon-social-photo-feed',
+            # Utilities
+            'wp-file-manager','classic-editor','classic-widgets',
+            'redirection','broken-link-checker','tablepress',
+            'query-monitor','wp-mail-smtp','post-smtp',
+            'akismet','jetpack','complianz-gdpr','cookie-notice',
+            'wp-crontrol','health-check','debug-bar',
+            'user-switching','wp-reset','wp-rollback',
+            'duplicate-page','duplicate-post',
+            'simple-history','stream',
+            # Infrastructure
+            'mainwp','mainwp-child','envato-market',
+            'tgm-plugin-activation','wp-cli-login-server',
+            'wp-staging','wp-staging-pro',
+            # Payments / eCommerce
+            'give','give-donations','charitable',
+            # File management
+            'wp-file-manager','filester','file-manager-advanced',
         ]
         endpoints = []
         for plugin in plugins:
@@ -1499,13 +1853,57 @@ class EndpointDiscovery:
 
     def get_sensitive_files_endpoints(self, base_url):
         return [
-            '/.ssh/id_rsa','/.ssh/id_dsa','/.ssh/authorized_keys',
-            '/.ssh/known_hosts','/.aws/credentials','/.aws/config',
-            '/.npmrc','/.bash_history','/.zsh_history','/.mysql_history',
-            '/.psql_history','/.docker/config.json','/.dockercfg',
-            '/.git-credentials','/.s3cfg','/.wp-cli/config.yml',
-            '/.netrc','/.passwd','/.shadow','/auth.json',
-            '/.gnupg/secring.gpg',
+            # SSH keys
+            '/.ssh/id_rsa','/.ssh/id_dsa','/.ssh/id_ecdsa','/.ssh/id_ed25519',
+            '/.ssh/id_rsa.pub','/.ssh/id_dsa.pub','/.ssh/id_ecdsa.pub','/.ssh/id_ed25519.pub',
+            '/.ssh/authorized_keys','/.ssh/known_hosts','/.ssh/config',
+            '/id_rsa','/id_rsa.pub','/id_dsa','/private_key',
+            # TLS/SSL keys
+            '/server.key','/server.crt','/server.pem','/server.p12',
+            '/cert.pem','/cert.key','/private.key','/private.pem',
+            '/ssl.key','/ssl.crt','/ssl.pem',
+            # AWS
+            '/.aws/credentials','/.aws/config','/.aws/session-token',
+            # GCP
+            '/.gcloud/application_default_credentials.json',
+            '/.config/gcloud/credentials',
+            '/google-credentials.json','/gcp-credentials.json',
+            # Azure
+            '/.azure/credentials',
+            # Kubernetes / container
+            '/.kube/config','/.dockercfg','/.docker/config.json',
+            # S3 / object storage
+            '/.s3cfg','/.boto','/.passwd-s3fs',
+            # npm / Python / Ruby
+            '/.npmrc','/.yarnrc','/.pypirc',
+            '/.pip/pip.conf','/.gem/credentials',
+            # Shell histories
+            '/.bash_history','/.zsh_history','/.sh_history',
+            '/.mysql_history','/.psql_history','/.mongo_history',
+            '/.python_history','/.local/share/recently-used.xbel',
+            # Credential files
+            '/.netrc','/.git-credentials','/.gitconfig',
+            '/auth.json','/credentials','/credentials.json',
+            '/keys.json','/token.json','/tokens.json',
+            '/access_token','/refresh_token',
+            '/client_secret.json','/service_account.json',
+            # Vault / secrets
+            '/.vault-token','/secrets.yml','/secrets.yaml',
+            '/secrets.json','/secrets.env',
+            # System (may be web-accessible in misconfigs)
+            '/.passwd','/.shadow','/etc/passwd','/etc/shadow',
+            '/.htpasswd',
+            # WP CLI
+            '/wp-cli.yml','/.wp-cli/config.yml',
+            # GPG
+            '/.gnupg/secring.gpg','/.gnupg/pubring.kbx',
+            # Terraform state (often contains credentials)
+            '/terraform.tfstate','/terraform.tfstate.backup',
+            '/.terraform/terraform.tfstate',
+            # Uploads sensitive
+            '/wp-content/uploads/.env',
+            '/wp-content/uploads/credentials.json',
+            '/wp-content/uploads/config.php',
         ]
 
     # ── SINGLE ENDPOINT TEST ──────────────────────────────────────────────────

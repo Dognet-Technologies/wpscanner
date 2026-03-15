@@ -2,8 +2,9 @@
 endpoint_discovery/
 *.json
 *.md
+!README.md
+!HISTORY.md
 *.tzt
 *.png
 __pycache__/
-HISTORY.md
-.keys
+wendy/.keys

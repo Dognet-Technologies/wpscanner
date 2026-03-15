@@ -1,0 +1,54 @@
+# WENDY API Keys & Probe Tuning
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this file to wendy/.keys and fill in your keys.
+# wendy/.keys is gitignored and will never be committed.
+#
+# All values here are also readable as environment variables, which take
+# precedence over this file (useful for CI/CD pipelines).
+
+# ── API Keys ──────────────────────────────────────────────────────────────────
+
+# Wordfence Intelligence API key — required for CVE database updates (-u flag)
+# Obtain for free at: https://www.wordfence.com (Account → Integrations)
+WORDFENCE_API_KEY=
+
+# WPScan API token — required for extended CVE lookup in aggressive mode
+# Free plan: 25 requests/day — https://wpscan.com/register
+WPSCAN_API_TOKEN=
+
+# ── Probe Tuning (optional) ───────────────────────────────────────────────────
+#
+# These parameters control which plugins are probed and how they are scored.
+# Defaults work well for most use cases; adjust for faster or more thorough scans.
+
+# Minimum WordPress active installs for a plugin to be included in normal mode.
+# Plugins below this threshold are skipped UNLESS they carry a recent CRITICAL CVE
+# (those are always probed regardless of install count).
+#
+# Suggested values:
+#   0       — no filter, probe all ~15 000 CVE-DB slugs (default, aggressive behaviour)
+#   1 000   — skip ultra-niche plugins, reduces normal-mode list significantly
+#   10 000  — skip anything not widely deployed; still catches ~95 % of real targets
+#   100 000 — only widely-used plugins; fastest scan, misses niche installs
+#
+MIN_ACTIVE_INSTALLS=0
+
+# Maximum number of plugins probed in normal (non-aggressive) mode.
+# Increase for broader coverage, decrease for faster scans.
+# Default: 3000
+PROBE_NORMAL_LIMIT=3000
+
+# Maximum number of themes probed in normal mode.
+# Default: 100
+PROBE_THEME_LIMIT=100
+
+# How many plugins to fetch from WordPress.org to build the installs index.
+# A larger index improves scoring accuracy but adds a few seconds to -u updates.
+# Default: 10000
+INSTALLS_INDEX_LIMIT=10000
+
+# Comma-separated list of CVE years considered "recent" for priority scoring.
+# Recent CVEs receive a +3 bonus per entry — set this to the last 1-2 years
+# if you want tighter focus, or add future years as they become active.
+# Default: 2024,2025,2026
+CVE_YEARS=2024,2025,2026

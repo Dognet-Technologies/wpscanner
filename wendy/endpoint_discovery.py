@@ -325,19 +325,47 @@ class EndpointDiscovery:
         self.session.mount("https://", adapter)
 
         self.user_agents = [
+            # Chrome – Windows
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+            # Chrome – macOS
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            # Chrome – Linux
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            # Firefox
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0',
+            # Safari
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+            # Mobile
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            # Edge
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+            # Crawlers (for detection evasion testing)
             'Googlebot/2.1 (+http://www.google.com/bot.html)',
+            'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)',
+            'Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot.html)',
         ]
 
         self.bypass_headers_list = [
+            # IP spoofing headers
             'X-Forwarded-For', 'X-Forwarded-Host', 'X-Remote-IP', 'X-Remote-Addr',
             'X-Client-IP', 'X-Real-IP', 'X-Originating-IP', 'X-Custom-IP-Authorization',
+            # CDN / proxy headers
             'CF-Connecting-IP', 'True-Client-IP', 'X-Cluster-Client-IP',
+            'X-Sucuri-Clientip', 'X-Akamai-Forwarded-For',
+            'X-Azure-ClientIP', 'X-ProxyUser-Ip',
+            # Misc bypass headers
+            'X-Forwarded-Server', 'X-HTTP-Host-Override',
+            'X-Original-Remote-Addr', 'X-Backend-Host',
         ]
 
         self.endpoint_categories = {
@@ -767,14 +795,18 @@ class EndpointDiscovery:
         Returns list of (header, status, value, risk_desc).
         """
         headers_spec = [
-            ('Strict-Transport-Security',  True,  'HSTS missing - susceptible to protocol downgrade and MITM'),
-            ('X-Frame-Options',            True,  'Clickjacking protection absent'),
-            ('X-Content-Type-Options',     True,  'MIME-type sniffing possible'),
-            ('Content-Security-Policy',    True,  'No CSP - XSS mitigation severely weakened'),
-            ('Referrer-Policy',            False, 'Referrer information may leak to third parties'),
-            ('Permissions-Policy',         False, 'Browser feature access unrestricted'),
-            ('X-XSS-Protection',           False, 'Legacy header (deprecated but still informative)'),
-            ('Cross-Origin-Opener-Policy', False, 'Cross-origin window access unrestricted'),
+            ('Strict-Transport-Security',       True,  'HSTS missing - susceptible to protocol downgrade and MITM'),
+            ('X-Frame-Options',                 True,  'Clickjacking protection absent'),
+            ('X-Content-Type-Options',          True,  'MIME-type sniffing possible'),
+            ('Content-Security-Policy',         True,  'No CSP - XSS mitigation severely weakened'),
+            ('Referrer-Policy',                 False, 'Referrer information may leak to third parties'),
+            ('Permissions-Policy',              False, 'Browser feature access unrestricted'),
+            ('X-XSS-Protection',                False, 'Legacy header (deprecated but still informative)'),
+            ('Cross-Origin-Opener-Policy',      False, 'Cross-origin window access unrestricted'),
+            ('Cross-Origin-Embedder-Policy',    False, 'Cross-origin embedding unrestricted'),
+            ('Cross-Origin-Resource-Policy',    False, 'Cross-origin resource sharing unrestricted'),
+            ('Cache-Control',                   False, 'Response caching policy not set'),
+            ('X-Permitted-Cross-Domain-Policies', False, 'Cross-domain policy not restricted (Flash/PDF)'),
         ]
         r = self._safe_get(base_url)
         if not r:
@@ -1191,9 +1223,14 @@ class EndpointDiscovery:
 
     def is_directory_listing(self, content):
         content_lower = content.lower()
-        indicators = ['index of ','directory listing','parent directory','[dir]',
-                      '[to parent directory]','last modified','size  description',
-                      'href=".."','href="../"']
+        indicators = [
+            'index of ', 'directory listing', 'parent directory',
+            '[dir]', '[to parent directory]', 'last modified',
+            'size  description', 'href=".."', 'href="../"',
+            'apache/2', 'nginx/', 'lighttpd/', 'iis/',
+            'folder listing', 'directory index',
+            'file listing', 'ls -la',
+        ]
         return sum(1 for i in indicators if i in content_lower) >= 2
 
     def is_bypass_false_positive(self, base_url, endpoint, bypass_content, bypass_url, content_length=None):
@@ -1235,14 +1272,38 @@ class EndpointDiscovery:
                           bypass_content.lower().count('<footer'))
             if complexity > 15 and 'index of' not in content_lower:
                 return True, f"Complex HTML page (score {complexity})", "high"
-            cms_ind = ['wordpress','wp-content','jquery','bootstrap','react','angular','vue']
+            cms_ind = [
+                'wordpress','wp-content','wp-includes','wp-json',
+                'jquery','bootstrap','react','angular','vue','svelte',
+                'elementor','woocommerce','jetpack','yoast',
+                'drupal','joomla','magento','shopify','prestashop',
+                'laravel','symfony','django','rails',
+            ]
             if any(i in content_lower for i in cms_ind) and 'index of' not in content_lower:
                 return True, "CMS/Framework content, not a directory listing", "high"
 
         error_patterns = [
-            ('page not found','high'),('error 404','high'),('file not found','high'),
-            ('pagina non trovata','high'),('not found','medium'),('does not exist','medium'),
-            ('nothing found','medium'),
+            # High-confidence 404/error patterns
+            ('page not found',       'high'),
+            ('error 404',            'high'),
+            ('404 not found',        'high'),
+            ('file not found',       'high'),
+            ('resource not found',   'high'),
+            ('pagina non trovata',   'high'),
+            ('página no encontrada', 'high'),
+            ('seite nicht gefunden', 'high'),
+            ('page introuvable',     'high'),
+            ('404 error',            'high'),
+            ('oops! that page',      'high'),
+            # Medium-confidence patterns
+            ('not found',            'medium'),
+            ('does not exist',       'medium'),
+            ('nothing found',        'medium'),
+            ('no results found',     'medium'),
+            ('sorry, we couldn',     'medium'),
+            ('the page you',         'medium'),
+            ('couldn\'t find',       'medium'),
+            ('cannot be found',      'medium'),
         ]
         for pattern, confidence in error_patterns:
             if pattern in content_lower:
@@ -1309,17 +1370,27 @@ class EndpointDiscovery:
 
         # 2. Header-based bypasses
         header_payloads = [
+            # URL override headers (rewrite server-side path)
             {'X-Original-URL': endpoint}, {'X-Rewrite-URL': endpoint},
             {'X-Forwarded-Path': endpoint}, {'X-Real-URL': endpoint},
-            {'X-ProxyUser-Ip': '127.0.0.1'}, {'X-Forwarded-For': '127.0.0.1'},
-            {'X-Forwarded-For': '::1'}, {'X-Originating-IP': '127.0.0.1'},
+            {'X-Override-URL': endpoint}, {'X-Custom-URL': endpoint},
+            # IP spoofing – localhost
+            {'X-Forwarded-For': '127.0.0.1'}, {'X-Forwarded-For': '::1'},
+            {'X-Forwarded-For': '10.0.0.1'}, {'X-Forwarded-For': '192.168.1.1'},
+            {'X-Real-IP': '127.0.0.1'}, {'X-Client-IP': '127.0.0.1'},
             {'X-Remote-IP': '127.0.0.1'}, {'X-Remote-Addr': '127.0.0.1'},
-            {'X-Client-IP': '127.0.0.1'}, {'X-Host': '127.0.0.1'},
+            {'X-Originating-IP': '127.0.0.1'}, {'X-ProxyUser-Ip': '127.0.0.1'},
+            {'X-Host': '127.0.0.1'}, {'X-Custom-IP-Authorization': '127.0.0.1'},
+            {'X-Cluster-Client-IP': '127.0.0.1'},
+            # Standard Forwarded header
             {'Forwarded': 'for=127.0.0.1;proto=http;host=localhost'},
-            # Cloudflare-specific
+            {'Forwarded': 'for=::1;proto=https;host=localhost'},
+            # CDN headers
             {'CF-Connecting-IP': '127.0.0.1'}, {'True-Client-IP': '127.0.0.1'},
-            # AWS ALB
+            {'X-Sucuri-Clientip': '127.0.0.1'}, {'X-Akamai-Forwarded-For': '127.0.0.1'},
+            # Host/origin manipulation
             {'X-Forwarded-Host': '127.0.0.1'}, {'X-Original-Host': 'localhost'},
+            {'X-Backend-Host': 'localhost'}, {'X-HTTP-Host-Override': 'localhost'},
         ]
         for payload in header_payloads:
             try:
@@ -1341,21 +1412,43 @@ class EndpointDiscovery:
 
         # 3. Path obfuscation
         variations = [
+            # Trailing dot / slash tricks
             endpoint + '/.',
+            endpoint + '//',
+            endpoint + '//.',
+            endpoint + '..;/',
+            # Double-slash prefix
             '//' + endpoint.lstrip('/') + '//',
+            # Dot traversal
             '/./' + endpoint.lstrip('/') + '/..',
+            '/.' + endpoint,
+            '/%2e' + endpoint,
+            '/%2e/' + endpoint.lstrip('/'),
+            # Semicolon bypass (Spring, Tomcat, etc.)
             '/;/' + endpoint.lstrip('/'),
             '/.;/' + endpoint.lstrip('/'),
             '//;//' + endpoint.lstrip('/'),
-            endpoint + '..;/',
+            endpoint + ';/',
+            endpoint + ';param',
+            # URL encoding
             endpoint + '%20',
             endpoint + '%09',
+            endpoint + '%0a',
+            endpoint + '%0d',
             endpoint + '%00',
+            endpoint.rstrip('/') + '%2f',
+            # Extension bypass
             endpoint + '.html',
+            endpoint + '.php',
+            endpoint + '.json',
+            endpoint + '.xml',
+            # Query string tricks
             endpoint + '?',
+            endpoint + '?v=1',
             endpoint + '#',
-            '/%2e' + endpoint,
-            '/.' + endpoint,
+            # Case variation (for case-insensitive servers)
+            endpoint.upper(),
+            endpoint.swapcase(),
         ]
         if self.aggressive:
             # Unicode normalization bypass
@@ -1366,6 +1459,10 @@ class EndpointDiscovery:
                 endpoint.rstrip('/') + '/..',
                 '/' + endpoint.lstrip('/').replace('/', '%2f'),
                 endpoint + '?%00',
+                endpoint + '%23',        # encoded #
+                endpoint + '%3f',        # encoded ?
+                '/' + endpoint.lstrip('/').replace('/', '/./'),
+                endpoint + '/.git/HEAD', # path confusion
             ]
         for variation in variations:
             try:
@@ -1938,13 +2035,36 @@ class EndpointDiscovery:
                     result['reason'] = "Likely false positive (HTML for non-HTML file)"
                 else:
                     interesting_patterns = [
-                        'DB_PASSWORD','DB_USER','DB_NAME','DB_HOST','define(',
-                        'API_KEY','SECRET','TOKEN','password','username',
+                        # Credentials / secrets
+                        'DB_PASSWORD','DB_USER','DB_NAME','DB_HOST','DB_PREFIX',
+                        'AUTH_KEY','SECURE_AUTH_KEY','LOGGED_IN_KEY','NONCE_KEY',
+                        'define(','API_KEY','API_SECRET','SECRET_KEY','SECRET',
+                        'TOKEN','ACCESS_TOKEN','REFRESH_TOKEN','PRIVATE_KEY',
+                        'password','passwd','pwd','credential','auth_token',
+                        'client_secret','bearer ','basic ',
+                        # Cloud/infra secrets
+                        'aws_access_key','aws_secret','AKIA','s3.amazonaws.com',
+                        'AIza',          # Google API key prefix
+                        'GITHUB_TOKEN','GH_TOKEN',
+                        # Error disclosure
                         'error','warning','exception','stack trace','debug',
+                        'traceback','fatal error','syntax error',
+                        'undefined variable','call to undefined',
+                        'mysql_connect','pg_connect','mysqli',
+                        # Directory listing
                         'Index of','Directory listing',
-                        '<?php','<?xml','SQL','SELECT','INSERT','UPDATE',
-                        'wp_','wordpress','admin','version','changelog',
-                        'mysql:','postgres:',
+                        # Source code
+                        '<?php','<?xml','<?=',
+                        # SQL
+                        'SQL','SELECT ','INSERT INTO','UPDATE ','DROP TABLE',
+                        'UNION SELECT','information_schema',
+                        # WP specific
+                        'wp_','wordpress','wp-config','wp-content',
+                        # Metadata / version info
+                        'changelog','readme','version','license',
+                        # DB connection strings
+                        'mysql://','postgres://','mongodb://','redis://',
+                        'mysql:','pgsql:','sqlite:',
                     ]
                     content_lower = content.lower()
                     for pat in interesting_patterns:

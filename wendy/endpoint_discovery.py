@@ -866,7 +866,11 @@ class EndpointDiscovery:
             )
             if not r or r.status_code != 200:
                 # Diagnostic: distinguish WAF block (HTML) from WP restriction (JSON)
-                if r and r.status_code in (401, 403):
+                if not r:
+                    self.vprint(
+                        f"    {C.DIM}REST /users: no response (timeout or connection reset "
+                        f"— WAF hard block){C.RESET}", level=1)
+                elif r.status_code in (401, 403):
                     ct = r.headers.get('Content-Type', '')
                     if 'json' in ct:
                         try:

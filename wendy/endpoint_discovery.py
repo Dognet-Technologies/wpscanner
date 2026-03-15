@@ -702,7 +702,7 @@ class EndpointDiscovery:
                     if 'text/html' not in content_type or _baseline_theme_status != 200:
                         # Extract version from style.css comment header (WordPress standard)
                         ver_match = re.search(
-                            r'^Version:\s*([0-9][0-9A-Za-z.\-+]*)',
+                            r'^Version:\s*v?([0-9][0-9A-Za-z.\-+]*)',
                             r.text, re.MULTILINE | re.IGNORECASE
                         )
                         theme_ver = ver_match.group(1).strip() if ver_match else None
@@ -870,12 +870,17 @@ class EndpointDiscovery:
                 if not isinstance(data, list) or not data:
                     break
                 for u in data:
+                    if not isinstance(u, dict):
+                        continue
                     uid  = u.get('id', '?')
                     name = u.get('slug') or u.get('name') or u.get('link', '')
                     if name:
                         users[uid] = {'username': name, 'method': 'REST API', 'extra': u.get('name','')}
                 # WordPress returns X-WP-TotalPages header; stop if no more pages
-                total_pages = int(r.headers.get('X-WP-TotalPages', 1))
+                try:
+                    total_pages = int(r.headers.get('X-WP-TotalPages', 1) or 1)
+                except (ValueError, TypeError):
+                    total_pages = 1
                 if _rest_page >= total_pages or len(data) < 100:
                     break
                 _rest_page += 1
@@ -1140,7 +1145,7 @@ class EndpointDiscovery:
         self.get_homepage_signature(base_url)
 
         for path, bad_cond, severity, title, desc in checks:
-            r = self._safe_get(base_url.rstrip('/') + path)
+            r = self._safe_get(base_url.rstrip('/') + path, allow_redirects=False)
             if r:
                 try:
                     if bad_cond(r) and not self._matches_homepage(r, base_url):
@@ -1255,14 +1260,18 @@ class EndpointDiscovery:
                             'url': f"{base}{path}",
                         })
                     else:
-                        # 200 with no login form at all — admin panel open
-                        findings.append({
-                            'severity': 'HIGH',
-                            'title': f'{label} accessible without authentication',
-                            'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
-                                     f'and body shows no login form — admin panel may be exposed'),
-                            'url': f"{base}{path}",
-                        })
+                        # 200 with no login form — but exclude WAF interception pages and
+                        # soft-redirect to homepage (some WAFs return HTTP 200 with a block
+                        # page body instead of a proper 403/redirect).
+                        is_waf, _ = self._is_waf_interception(r)
+                        if not is_waf and not self._matches_homepage(r, base_url):
+                            findings.append({
+                                'severity': 'HIGH',
+                                'title': f'{label} accessible without authentication',
+                                'desc': (f'{path} returns HTTP 200 without redirecting to wp-login.php '
+                                         f'and body shows no login form — admin panel may be exposed'),
+                                'url': f"{base}{path}",
+                            })
                 # 403/401 = server-level block, even more hardened than default — no finding
             except Exception:
                 pass
@@ -1388,7 +1397,7 @@ class EndpointDiscovery:
         probe_name = f"wendy-probe-{random.randint(10000,99999)}.php"
         probe_url  = f"{base_url.rstrip('/')}/wp-content/uploads/{probe_name}"
         try:
-            r = self._safe_get(probe_url, timeout=8)
+            r = self._safe_get(probe_url, timeout=8, allow_redirects=False)
             if r:
                 if r.status_code == 200:
                     # A 200 for a non-existent .php file in uploads means the server
@@ -1681,6 +1690,168 @@ class EndpointDiscovery:
 
         return False, "Appears valid", "low"
 
+    def _is_waf_interception(self, response):
+        """
+        Detect whether an HTTP 200 response is actually a WAF/CDN interception
+        page rather than legitimate content being served.
+
+        Checks response headers, Set-Cookie fingerprints, and body patterns for
+        known vendors. Returns (bool, str) — (is_waf, vendor_name).
+
+        This is the primary defence against false-positive bypass reports when
+        a WAF returns HTTP 200 for its own challenge/block page instead of the
+        real resource (common in Incapsula, Cloudflare JS challenges, etc.).
+        """
+        if response is None:
+            return False, ''
+
+        # Normalise headers to lowercase keys for case-insensitive lookup
+        hdrs = {k.lower(): v.lower() for k, v in response.headers.items()}
+        body = response.text[:4000]
+        body_lower = body.lower()
+
+        # Collect all Set-Cookie header values (requests merges them — use raw)
+        set_cookie = ''
+        try:
+            raw_set_cookie = response.raw.headers.getlist('Set-Cookie')
+            set_cookie = ' '.join(raw_set_cookie).lower()
+        except Exception:
+            set_cookie = hdrs.get('set-cookie', '')
+
+        # ── Imperva / Incapsula ───────────────────────────────────────────────
+        # Header: x-iinfo is Incapsula's internal request-tracking header
+        # Cookies: visid_incap_<site_id> (visitor ID) and incap_ses_<port>_<site_id>
+        # Body: /_Incapsula_Resource script tag; "incapsula incident id" in block page
+        if 'x-iinfo' in hdrs:
+            return True, 'Imperva Incapsula'
+        if 'visid_incap_' in set_cookie or 'incap_ses_' in set_cookie:
+            return True, 'Imperva Incapsula'
+        if '/_incapsula_resource' in body_lower or 'incapsula incident id' in body_lower:
+            return True, 'Imperva Incapsula'
+
+        # ── Cloudflare ────────────────────────────────────────────────────────
+        # Header: cf-ray (request ID present on ALL CF responses, including blocks)
+        # Header: cf-mitigated: challenge (explicit challenge signal)
+        # Server: cloudflare
+        # Cookies: __cf_bm (bot management), cf_clearance (cleared challenge)
+        # Body: Cloudflare challenge/error pages reference "ray id" or "cf-ray"
+        if 'cf-ray' in hdrs:
+            return True, 'Cloudflare'
+        if 'cf-mitigated' in hdrs:
+            return True, 'Cloudflare'
+        if hdrs.get('server', '') == 'cloudflare':
+            return True, 'Cloudflare'
+        if '__cf_bm' in set_cookie or 'cf_clearance' in set_cookie:
+            return True, 'Cloudflare'
+        if 'cloudflare' in body_lower and (
+            'ray id' in body_lower or 'please enable cookies' in body_lower
+            or 'checking your browser' in body_lower or 'ddos protection' in body_lower
+        ):
+            return True, 'Cloudflare'
+
+        # ── Sucuri WAF ────────────────────────────────────────────────────────
+        # Headers: x-sucuri-id (request ID), x-sucuri-cache (cache status)
+        # Body: Sucuri block page phrases
+        if 'x-sucuri-id' in hdrs or 'x-sucuri-cache' in hdrs:
+            return True, 'Sucuri WAF'
+        if 'sucuri website firewall' in body_lower or 'access denied - sucuri' in body_lower:
+            return True, 'Sucuri WAF'
+
+        # ── Akamai ────────────────────────────────────────────────────────────
+        # Headers: x-akamai-transformed, akamai-origin-hop, x-check-cacheable
+        # Cookies: ak_bmsc (bot manager sensor), bm_sz (sensor data)
+        # Body: Akamai error "Reference #" pattern
+        if 'x-akamai-transformed' in hdrs or 'akamai-origin-hop' in hdrs:
+            return True, 'Akamai'
+        if 'x-check-cacheable' in hdrs and hdrs.get('server', '').startswith('ak'):
+            return True, 'Akamai'
+        if 'ak_bmsc' in set_cookie or 'bm_sz' in set_cookie:
+            return True, 'Akamai'
+        if 'reference #' in body_lower and 'akamai' in body_lower:
+            return True, 'Akamai'
+
+        # ── Wordfence ─────────────────────────────────────────────────────────
+        # Body: Wordfence block pages are generated server-side by the plugin
+        if 'wordfence' in body_lower and (
+            'your access to this site has been limited' in body_lower
+            or 'generated by wordfence' in body_lower
+            or 'wordfence security' in body_lower
+        ):
+            return True, 'Wordfence'
+
+        # ── AWS WAF / CloudFront ──────────────────────────────────────────────
+        # Headers: x-amzn-requestid or x-amzn-trace-id = API Gateway / Lambda
+        # x-amz-cf-id = CloudFront distribution
+        if 'x-amzn-requestid' in hdrs or 'x-amzn-trace-id' in hdrs:
+            if 'aws waf' in body_lower or 'request blocked' in body_lower:
+                return True, 'AWS WAF'
+        if 'x-amz-cf-id' in hdrs and 'the request could not be satisfied' in body_lower:
+            return True, 'AWS CloudFront'
+        if 'x-amz-cf-id' in hdrs and 'error from cloudfront' in body_lower:
+            return True, 'AWS CloudFront'
+
+        # ── DDoS-Guard ────────────────────────────────────────────────────────
+        # Server header or cookies: __ddg1_, __ddg2_, __ddg5_, __ddgid
+        if hdrs.get('server', '').startswith('ddos-guard'):
+            return True, 'DDoS-Guard'
+        if '__ddg1_' in set_cookie or '__ddg2_' in set_cookie or '__ddgid' in set_cookie:
+            return True, 'DDoS-Guard'
+
+        # ── Barracuda WAF ─────────────────────────────────────────────────────
+        # Headers prefixed x-barracuda-
+        if any(k.startswith('x-barracuda') for k in hdrs):
+            return True, 'Barracuda WAF'
+
+        # ── Reblaze ───────────────────────────────────────────────────────────
+        if any(k.startswith('x-reblaze') for k in hdrs):
+            return True, 'Reblaze'
+
+        # ── F5 BIG-IP ASM ─────────────────────────────────────────────────────
+        # TS (TrafficShield) cookies + x-wa-info header
+        if 'x-wa-info' in hdrs:
+            return True, 'F5 BIG-IP ASM'
+        if re.search(r'ts[0-9a-f]{8,}', set_cookie):
+            if 'support id' in body_lower or 'the requested url was rejected' in body_lower:
+                return True, 'F5 BIG-IP ASM'
+
+        # ── BunkerWeb ─────────────────────────────────────────────────────────
+        if 'bunkerweb' in hdrs.get('server', ''):
+            return True, 'BunkerWeb'
+
+        # ── Fastly CDN block page ─────────────────────────────────────────────
+        # Only flag as WAF if it's an actual block/error, not normal cached content
+        if 'x-fastly-request-id' in hdrs and 'fastly error' in body_lower:
+            return True, 'Fastly CDN'
+
+        # ── ModSecurity (via Server header) ───────────────────────────────────
+        if 'mod_security' in hdrs.get('server', '') or 'modsecurity' in hdrs.get('server', ''):
+            return True, 'ModSecurity'
+        if 'mod_security' in body_lower and 'not acceptable' in body_lower:
+            return True, 'ModSecurity'
+
+        # ── Palo Alto Prisma Cloud / PAN-OS ───────────────────────────────────
+        if any(k.startswith('x-pan-') for k in hdrs):
+            return True, 'Palo Alto WAF'
+
+        # ── Generic WAF block page signals (lower confidence, last resort) ────
+        # These match phrases that appear across many WAF vendors' block pages.
+        # Only triggered when no vendor-specific fingerprint was found.
+        generic_block = [
+            'your request has been blocked',
+            'this request has been blocked',
+            'request blocked by',
+            'access denied by security policy',
+            'security policy violation',
+            'firewall blocked your request',
+            'web application firewall',
+            'you have been blocked',
+            'ip has been blocked',
+        ]
+        if any(s in body_lower for s in generic_block):
+            return True, 'WAF (generic)'
+
+        return False, ''
+
     def verify_403_validity(self, base_url):
         for _ in range(3):
             suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -1726,7 +1897,7 @@ class EndpointDiscovery:
                 bypass_url = f"{base_url.rstrip('/')}{endpoint}"
                 r = self.session.request(method, bypass_url, headers=self.get_random_headers(),
                                          timeout=10, allow_redirects=False, verify=False)
-                if r.status_code == 200:
+                if r.status_code == 200 and not self._is_waf_interception(r)[0]:
                     bypasses.append({'method': f'HTTP Method ({method})', 'http_method': method,
                                      'url': bypass_url, 'status': 200,
                                      'preview': r.text[:200], 'full_content': r.text[:2000],
@@ -1767,7 +1938,7 @@ class EndpointDiscovery:
                        else f"{base_url.rstrip('/')}{endpoint}")
                 r = self.session.get(url, headers=headers, timeout=10,
                                      allow_redirects=False, verify=False)
-                if r.status_code == 200:
+                if r.status_code == 200 and not self._is_waf_interception(r)[0]:
                     header_name = list(payload.keys())[0]
                     bypasses.append({'method': f'Header ({header_name})', 'url': url,
                                      'bypass_headers': payload, 'status': 200,
@@ -1836,7 +2007,7 @@ class EndpointDiscovery:
                 bypass_url = f"{base_url.rstrip('/')}{variation}"
                 r = self.session.get(bypass_url, headers=self.get_random_headers(),
                                      timeout=10, allow_redirects=False, verify=False)
-                if r.status_code == 200:
+                if r.status_code == 200 and not self._is_waf_interception(r)[0]:
                     bypasses.append({'method': f'Path ({variation})', 'url': bypass_url,
                                      'status': 200, 'preview': r.text[:200],
                                      'full_content': r.text[:2000], 'content_length': len(r.text),
@@ -1851,7 +2022,7 @@ class EndpointDiscovery:
                 bypass_url = f"{base_url.rstrip('/')}{variant}"
                 r = self.session.get(bypass_url, headers=self.get_random_headers(),
                                      timeout=10, allow_redirects=False, verify=False)
-                if r.status_code == 200:
+                if r.status_code == 200 and not self._is_waf_interception(r)[0]:
                     bypasses.append({'method': f'Case ({variant})', 'url': bypass_url,
                                      'status': 200, 'preview': r.text[:200],
                                      'full_content': r.text[:2000], 'content_length': len(r.text),
@@ -2347,7 +2518,14 @@ class EndpointDiscovery:
             if response.status_code == 200:
                 content = response.text[:1000]
                 result['preview'] = content[:200]
-                if self.is_likely_false_positive(endpoint, content_type, content):
+                # WAF interception check: must come before content analysis to
+                # prevent challenge pages from matching interesting_patterns
+                _waf, _waf_vendor = self._is_waf_interception(response)
+                if _waf:
+                    result['is_false_positive'] = True
+                    result['waf_vendor'] = _waf_vendor
+                    result['reason'] = f'WAF interception ({_waf_vendor})'
+                elif self.is_likely_false_positive(endpoint, content_type, content):
                     result['is_false_positive'] = True
                     result['reason'] = "Likely false positive (HTML for non-HTML file)"
                 else:
@@ -2448,6 +2626,11 @@ class EndpointDiscovery:
                         bp_info = f" {C.RED}[{n} BYPASS{'ES' if n>1 else ''}]{C.RESET}"
                     self.vprint(f"\n   {C.GREEN}✓{C.RESET} {result['endpoint']} "
                                 f"→ {status} {reason}{verif}{bp_info}", level=1)
+                elif result.get('waf_vendor'):
+                    # WAF-intercepted 200 — not interesting but worth noting at -v
+                    self.vprint(
+                        f"\n   {C.DIM}~ {result['endpoint']} → 200 "
+                        f"[WAF: {result['waf_vendor']}]{C.RESET}", level=1)
                 elif result.get('status_code') == 403 and 'False positive' in result.get('verification',''):
                     self.vprint(f"\n   {C.DIM}✗ {result['endpoint']} → 403 (FP){C.RESET}", level=2)
 
@@ -2666,6 +2849,19 @@ class EndpointDiscovery:
         # ── PHASE 8: ENDPOINT DISCOVERY ──────────────────────────────────────
         self._section(8, TOTAL_PHASES, "Endpoint Discovery")
 
+        # WAF detection probe — performed once before the scan loop so the
+        # result is available for the banner line and for per-result annotations.
+        print(f"  Detecting WAF/CDN...", end=' ', flush=True)
+        _waf_probe_r = self._safe_get(base_url, timeout=8)
+        _waf_detected, _waf_name = self._is_waf_interception(_waf_probe_r) if _waf_probe_r else (False, '')
+        if _waf_detected:
+            print(f"{C.YELLOW}[WAF: {_waf_name}]{C.RESET}")
+            print(f"  {C.YELLOW}⚠{C.RESET}  {C.DIM}WAF/CDN detected — challenge pages will be filtered "
+                  f"from bypass results (vendor: {_waf_name}){C.RESET}")
+        else:
+            print(f"{C.GREEN}none detected{C.RESET}")
+        print()
+
         print(f"  Verifying 403 global validity...", end=' ', flush=True)
         self.valid_403s = self.verify_403_validity(base_url)
         status_403 = (f"{C.GREEN}valid (404 for nonexistent){C.RESET}" if self.valid_403s
@@ -2871,12 +3067,15 @@ def main():
         description='WENDY - WordPress ENDpoint discoverY v0.4.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            'Endpoint Discovery — 403 sigils:\n'
-            '  [VERIFIED]    Real 403 confirmed (canary URL returns 404 as expected)\n'
-            '  [UNVERIFIED]  403 likely real but could not be confirmed (network error)\n'
-            '  [FP]          False positive — server returns 403 for everything (WAF/global rule)\n'
-            '  (protected)   Real 403, bypass attempts failed — endpoint correctly hardened\n'
-            '  [N BYPASSES]  Real 403, but N bypass techniques returned 200\n'
+            'Endpoint Discovery — result sigils:\n'
+            '  [VERIFIED]        Real 403 confirmed (canary URL returns 404 as expected)\n'
+            '  [UNVERIFIED]      403 likely real but could not be confirmed (network error)\n'
+            '  [FP]              False positive — server returns 403 for everything (WAF/global rule)\n'
+            '  (protected)       Real 403, all bypass attempts blocked — endpoint hardened\n'
+            '  [N BYPASSES]      Real 403, but N bypass techniques returned 200\n'
+            '  [WAF: <vendor>]   Response was a WAF/CDN interception page, not real content\n'
+            '                    (Supported: Cloudflare, Imperva, Sucuri, Akamai, Wordfence,\n'
+            '                     AWS WAF, DDoS-Guard, Barracuda, F5 BIG-IP, Reblaze, ModSecurity)\n'
         ),
     )
     parser.add_argument('url', nargs='?', default=None,

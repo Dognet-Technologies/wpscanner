@@ -323,6 +323,116 @@ feed.
 
 ---
 
+## 2026-03 — v0.4.0 (post-release): WAF/CDN interception detection
+
+### Problem: false positive bypass results behind Imperva / Cloudflare
+
+Observed on `sorintsec.ai` (protected by Imperva Incapsula): every bypass
+probe returned HTTP 200 — because Incapsula intercepts requests and serves
+its own JavaScript challenge page with status 200 instead of forwarding the
+request to the origin server. WENDY's bypass detection saw 200 and logged
+it as a successful bypass, reporting dozens of false positives.
+
+The same behaviour is documented for Cloudflare JS challenges, Sucuri block
+pages, Akamai bot manager, and Wordfence block pages — all return 200 with a
+self-contained HTML page rather than passing the request through.
+
+**Root cause:** The existing false positive pipeline (`is_bypass_false_positive`,
+`is_likely_false_positive`) was designed to detect soft 404s and homepage
+clones. WAF challenge pages have completely different characteristics:
+- Very short bodies (212 bytes for Incapsula JS challenge)
+- No WordPress fingerprints in body
+- No homepage title match
+- No 404 error strings
+- Pass all existing checks → incorrectly classified as valid bypasses
+
+### Decision: dedicated `_is_waf_interception(response)` method
+
+**Why a dedicated method and not extending `is_bypass_false_positive()`:**
+WAF detection requires inspecting **response headers and cookies**, not just
+body content. `is_bypass_false_positive()` only receives the body string (by
+design — it was built before we needed headers). Extending its signature to
+accept the full response object would require changing every call site and
+break the separation of concerns.
+
+A standalone `_is_waf_interception(response)` method:
+- Takes the full `requests.Response` object
+- Returns `(bool, str)` — (is_waf, vendor_name)
+- Is called early, before any content analysis
+- Has zero false positive risk on non-WAF sites (all checks are vendor-specific)
+
+**Alternatives considered:**
+
+| Option | Reason rejected |
+|---|---|
+| Add `response_headers` param to `is_bypass_false_positive()` | Breaks existing call signatures across test_403_bypasses; confuses the purpose of the function (FP detection vs WAF detection are different problems) |
+| Detect WAF in `is_likely_false_positive()` | Same issue — content-only function; also called for non-bypass 200s where we have the response object, so a separate method is cleaner |
+| Check body-only patterns (no headers) | Too fragile; Incapsula's 212-byte JS challenge body doesn't contain "blocked" or "firewall" strings — only `/_Incapsula_Resource`. Header detection (`x-iinfo`, `visid_incap_`) is far more reliable |
+| Whitelist of known challenge page lengths | Brittle; Incapsula uses different lengths for different challenge types (212 for JS challenge, 842+ for bot fingerprint page) |
+
+### Decision: three integration points for WAF detection
+
+1. **`test_endpoint()` — 200 branch**: WAF check runs before `is_likely_false_positive()` and content pattern matching. If WAF detected: `interesting=False`, `waf_vendor` stored, `reason='WAF interception (vendor)'`. This prevents challenge pages from matching `interesting_patterns` (e.g. `'wordpress'` or `'wp-content'` appearing in Incapsula's `/_Incapsula_Resource` path).
+
+2. **`test_403_bypasses()` — all four 200 checks**: The `and not self._is_waf_interception(r)[0]` guard is appended directly to each `if r.status_code == 200:` condition. Bypass entries are never added for WAF interceptions. This means the bypass count accurately reflects real bypasses and `[N BYPASSES]` is never inflated by WAF challenge pages.
+
+3. **`run_full_scan()` Phase 8 banner**: One probe of the homepage runs `_is_waf_interception()` before the scan loop. If WAF is detected, a warning line informs the operator that challenge pages will be filtered. This is important context: the operator knows in advance that bypass results may be suppressed and that confirmed bypasses represent real WAF evasion.
+
+**Why not abort the bypass scan entirely when WAF is detected?**
+A WAF does not mean all paths are protected identically. Some paths may bypass
+WAF rules (misconfiguration, path exceptions, IP allowlists triggered by
+bypass headers). A real bypass through Imperva or Cloudflare is a CRITICAL
+finding. Aborting would miss these. We filter noise (challenge pages) while
+still looking for real bypasses.
+
+### Decision: detection strategy — two tiers of signals
+
+**Tier 1 — Vendor fingerprints (high confidence, vendor-specific):**
+Each major WAF vendor leaves deterministic traces:
+- **Imperva Incapsula**: `x-iinfo` header (present on ALL Incapsula responses),
+  `visid_incap_<sid>` and `incap_ses_<port>_<sid>` cookies, `/_Incapsula_Resource`
+  script in body
+- **Cloudflare**: `cf-ray` header (present on ALL CF responses), `cf-mitigated`,
+  `server: cloudflare`, `__cf_bm` / `cf_clearance` cookies, body phrases
+  ("checking your browser", "ddos protection", "please enable cookies")
+- **Sucuri**: `x-sucuri-id` / `x-sucuri-cache` headers, "sucuri website firewall"
+  in body
+- **Akamai**: `x-akamai-transformed`, `akamai-origin-hop`, `ak_bmsc` / `bm_sz`
+  cookies (Bot Manager sensor cookies), "reference #" + "akamai" in body
+- **Wordfence**: "your access to this site has been limited" or "generated by
+  wordfence" in body (plugin-generated block page)
+- **AWS WAF**: `x-amzn-requestid` / `x-amzn-trace-id` + "aws waf" in body;
+  `x-amz-cf-id` + "the request could not be satisfied" (CloudFront error)
+- **DDoS-Guard**: `server: ddos-guard`, `__ddg1_` / `__ddg2_` cookies
+- **Barracuda**: any header starting with `x-barracuda`
+- **F5 BIG-IP ASM**: `x-wa-info` header, `ts<hex>` cookies + "support id" body
+- **Reblaze**: any header starting with `x-reblaze`
+- **ModSecurity**: `mod_security` / `modsecurity` in Server header
+- **Palo Alto**: any header starting with `x-pan-`
+- **BunkerWeb**: `bunkerweb` in Server header
+- **Fastly CDN**: `x-fastly-request-id` + "fastly error" in body
+
+**Tier 2 — Generic block page phrases (lower confidence, last resort):**
+Only triggered when no vendor-specific fingerprint matched. Phrases like
+"your request has been blocked", "web application firewall", "you have been
+blocked" appear across many vendors' generic templates. Risk of false positives
+is low because legitimate WordPress pages don't contain these phrases.
+
+**Why check `raw.headers.getlist('Set-Cookie')` instead of `response.cookies`?**
+The `requests` library merges all `Set-Cookie` headers into a single `CookieJar`
+by name. If two cookies have different names but the same prefix (`visid_incap_3269851`
+and `visid_incap_8847312`), they are accessible individually. However, using
+`.getlist('Set-Cookie')` on the raw urllib3 response object gives us the raw
+header string including the full cookie name with the site ID suffix — which is
+what we need for substring matching (`'visid_incap_' in set_cookie`).
+
+**Tradeoff:** `_is_waf_interception()` is called for **every** 200 response in
+bypass testing (up to ~30 bypass probes per 403 endpoint). The method does no
+network I/O and only inspects already-loaded response data — CPU cost is
+negligible. Memory: `response.text[:4000]` is always already buffered.
+
+---
+
 ## Future decision log template
 
 ```

@@ -8,3 +8,5 @@ endpoint_discovery/
 *.png
 __pycache__/
 wendy/.keys
+Immagini
+.gitignore

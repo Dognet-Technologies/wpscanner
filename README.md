@@ -112,7 +112,6 @@ python wendy/endpoint_discovery.py https://target.com --aggressive
 ```bash
 git clone https://github.com/Dognet-Technologies/wpscanner.git
 cd wpscanner
-pip install requests
 
 # (Opzionale ma raccomandato) Aggiorna il database CVE live
 python wendy/endpoint_discovery.py -u

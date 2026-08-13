@@ -34,10 +34,11 @@ from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Load API keys from wendy/.keys before anything else reads os.environ
 try:
-    from wendy.config import load_keys
+    from wendy.config import load_keys, load_probe_config
 except ImportError:
-    from config import load_keys
+    from config import load_keys, load_probe_config
 load_keys()
+_PROBE_CFG = load_probe_config()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -52,7 +53,9 @@ MIN_CVSS = 0.0
 # WordPress.org public API (no auth required)
 WP_ORG_PLUGIN_API            = "https://api.wordpress.org/plugins/info/1.2/"
 WP_ORG_THEME_API             = "https://api.wordpress.org/themes/info/1.2/"
-WP_ORG_POPULAR_PLUGINS_LIMIT = 10000   # plugins indexed for installs data + scoring
+# Plugins indexed for installs data + scoring — configurable via INSTALLS_INDEX_LIMIT
+# in wendy/.keys (see config.py); falls back to the same 10000 default.
+WP_ORG_POPULAR_PLUGINS_LIMIT = _PROBE_CFG['installs_index_limit']
 WP_ORG_POPULAR_THEMES_LIMIT  = 500     # themes cached for smart theme probing
 
 _USER_AGENT = 'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)'

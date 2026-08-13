@@ -319,6 +319,11 @@ class EndpointDiscovery:
         retry_strategy = Retry(
             total=3, backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
+            # A rate-limiting/WAF-protected target can send an arbitrarily large
+            # Retry-After (minutes). Honoring it would block a worker thread for
+            # that long with no way to interrupt cleanly — always use our own
+            # bounded exponential backoff instead.
+            respect_retry_after_header=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://",  adapter)
@@ -674,13 +679,17 @@ class EndpointDiscovery:
                 'movedo','sugar','stockholm','monstroid2','ivy','smart',
             ]
         else:
-            # Fill up to NORMAL_MODE_THEME_LIMIT with CVE themes then popular themes,
-            # then always append baseline fallbacks (they're few and always relevant).
-            _priority   = _theme_cve_slugs + [s for s in _theme_popular
-                                               if s not in _theme_cve_set]
-            _capped     = _priority[:NORMAL_MODE_THEME_LIMIT]
-            _capped_set = set(_capped)
-            theme_probe = _capped + [s for s in _theme_baseline if s not in _capped_set]
+            # Priority order: CVE themes first, then popular, then baseline
+            # fallback — cap the *whole* list to NORMAL_MODE_THEME_LIMIT so the
+            # configured limit actually bounds the total number of themes probed
+            # (previously only the CVE+popular portion was capped, and the full
+            # baseline list was always appended on top, uncapped).
+            _priority = (
+                _theme_cve_slugs
+                + [s for s in _theme_popular if s not in _theme_cve_set]
+                + _theme_baseline
+            )
+            theme_probe = _priority[:NORMAL_MODE_THEME_LIMIT]
 
         # Exclude already-found themes and deduplicate (preserving priority order)
         theme_probe = list(dict.fromkeys(s for s in theme_probe if s not in themes_from_html))
@@ -2698,7 +2707,8 @@ class EndpointDiscovery:
         interesting = []
         workers     = 10 if self.aggressive else 5
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = {executor.submit(self.test_endpoint, base_url, ep): ep for ep in endpoints}
             for future in as_completed(futures):
                 result = future.result()
@@ -2727,6 +2737,14 @@ class EndpointDiscovery:
                         f"[WAF: {result['waf_vendor']}]{C.RESET}", level=1)
                 elif result.get('status_code') == 403 and 'False positive' in result.get('verification',''):
                     self.vprint(f"\n   {C.DIM}✗ {result['endpoint']} → 403 (FP){C.RESET}", level=2)
+        finally:
+            # cancel_futures drops every probe that hasn't started yet instead of
+            # blocking until the whole queue drains — matters when the target is
+            # rate-limiting and each retry/backoff can take several seconds.
+            # Without this, a single Ctrl+C during a large category (e.g.
+            # "Plugin Specific") appears to hang because shutdown()'s default
+            # wait=True waits for all already-submitted work to finish first.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         count = len(interesting)
         color = C.RED if count > 0 else C.GREEN
@@ -3050,7 +3068,14 @@ class EndpointDiscovery:
         # Collect all findings for scoring + summary detail
         summary_findings = []  # (severity, label, detail)
 
+        # Only confirmed CVEs (known version, known vulnerable) count toward the
+        # report. Speculative matches (plugin detected, version unreadable) are
+        # not evidence of a vulnerability and must never be silently blended in
+        # here — same gate as PHASE 2's confirmed/possible split.
+        speculative_cves = [f for f in cve_findings if not f.get('certain', True)]
         for f in cve_findings:
+            if not f.get('certain', True):
+                continue
             summary_findings.append((
                 f['severity'],
                 f"{f['slug']} {f['cve']}",
@@ -3111,6 +3136,15 @@ class EndpointDiscovery:
             print()
             for r in all_interesting:
                 print(f"  {C.CYAN}[INFO]{C.RESET}  {r['endpoint']}  {C.DIM}{r.get('reason','')}{C.RESET}")
+
+        # Speculative CVE matches never feed the CRITICAL/HIGH/MEDIUM counts above —
+        # shown separately, and only with --aggressive, so they can't be mistaken
+        # for confirmed vulnerabilities.
+        if speculative_cves and self.aggressive:
+            print(f"\n  {C.DIM}── Speculative CVE matches (version unreadable — NOT confirmed) ──{C.RESET}")
+            for f in speculative_cves:
+                sev = sev_color(f['severity'])
+                print(f"  {C.DIM}? {sev} {f['slug']}  {f['cve']}  CVSS {f['cvss']}  [UNCONFIRMED]{C.RESET}")
 
         print()
         if counts['CRITICAL'] > 0 or counts['HIGH'] > 0:

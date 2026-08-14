@@ -339,6 +339,7 @@ class EndpointDiscovery:
         self.verbosity  = verbosity   # 0=normal, 1=-v, 2=-vv
         self.aggressive = aggressive  # expanded coverage
         self.valid_403s = True
+        self.fuzzy_redirect_routing = False   # set by _detect_fuzzy_prefix_routing()
         self.custom_wordlist_entries = (
             _load_wordlist_file(wordlist_path) if wordlist_path else []
         )
@@ -2002,6 +2003,38 @@ class EndpointDiscovery:
                 continue
         return True
 
+    def _detect_fuzzy_prefix_routing(self, base_url):
+        """
+        Some targets redirect ANY short string that happens to be a prefix of
+        a real page slug to that page — e.g. a redirect-manager plugin or
+        "smart 404" doing startswith matching ('/ca' -> /cart/, '/co' ->
+        /contact/). The long-random-suffix canary in verify_403_validity()
+        never triggers this (it's never a prefix of anything real), but
+        short wordlist entries (SecLists-style short-token lists) do, making
+        ordinary site navigation look like dozens of "hidden endpoints".
+
+        Probes a few random 1-3 char canaries; if enough of them also
+        redirect to a distinct real-looking (non-homepage) page, the target
+        is flagged so short redirect hits can be labeled as likely routing
+        noise instead of genuine findings.
+        """
+        hits = 0
+        for length in (1, 2, 3):
+            suffix = ''.join(random.choices(string.ascii_lowercase, k=length))
+            try:
+                r = self.session.get(
+                    f"{base_url.rstrip('/')}/{suffix}",
+                    headers=self.get_random_headers(), timeout=8,
+                    allow_redirects=False, verify=False
+                )
+            except Exception:
+                continue
+            if r.status_code in (301, 302):
+                location = r.headers.get('Location', '')
+                if location and not self._is_homepage_redirect(base_url, location):
+                    hits += 1
+        return hits >= 2
+
     def verify_403_specific(self, base_url, endpoint):
         suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
         test_ep = (endpoint + suffix) if endpoint.endswith('/') else f"{endpoint}-{suffix}"
@@ -2587,6 +2620,13 @@ class EndpointDiscovery:
                 f'/wp-content/plugins/{plugin}/settings.php',
                 f'/wp-content/plugins/{plugin}/debug.log',
                 f'/wp-content/plugins/{plugin}/error.log',
+                # Leftover dev/deploy artifacts — real, recurring misconfig
+                # patterns (unlike readme/changelog, these are never supposed
+                # to be there at all):
+                f'/wp-content/plugins/{plugin}/.env',
+                f'/wp-content/plugins/{plugin}/.git/config',
+                f'/wp-content/plugins/{plugin}/.git/HEAD',
+                f'/wp-content/plugins/{plugin}.zip',   # sibling backup archive
             ]
         return endpoints
 
@@ -2700,11 +2740,20 @@ class EndpointDiscovery:
                         'mysql:','pgsql:','sqlite:',
                     ]
                     content_lower = content.lower()
-                    for pat in interesting_patterns:
-                        if pat.lower() in content_lower:
-                            result['interesting'] = True
-                            result['reason'] = f"Contains: {pat}"
-                            break
+                    # Collect every matching pattern instead of stopping at the
+                    # first — a response can legitimately contain more than one
+                    # (e.g. both a generic 'error' AND a real 'DB_PASSWORD' or
+                    # an AWS key); breaking on the first hit silently drops the
+                    # rest and the list order (credentials first, then generic
+                    # noise like 'error'/'version') is no substitute for
+                    # actually reporting what's there.
+                    matched = [pat for pat in interesting_patterns
+                               if pat.lower() in content_lower]
+                    if matched:
+                        result['interesting'] = True
+                        shown = matched[:8]
+                        extra = f" (+{len(matched)-8} more)" if len(matched) > 8 else ""
+                        result['reason'] = "Contains: " + ", ".join(shown) + extra
 
             elif response.status_code == 403:
                 is_real, verif_msg = self.verify_403_specific(base_url, endpoint)
@@ -2726,7 +2775,13 @@ class EndpointDiscovery:
                     result['reason'] = f"Soft redirect to homepage"
                 else:
                     result['interesting'] = True
-                    result['reason'] = f"Redirect → {location}"
+                    note = ''
+                    if self.fuzzy_redirect_routing and len(endpoint.strip('/')) <= 4:
+                        # Target redirects short prefix strings to real pages
+                        # (detected by _detect_fuzzy_prefix_routing) — flag
+                        # rather than hide, since it could still be real.
+                        note = ' [possible prefix-routing noise, not necessarily a real hidden endpoint]'
+                    result['reason'] = f"Redirect → {location}{note}"
 
             return result
 
@@ -3020,6 +3075,17 @@ class EndpointDiscovery:
         status_403 = (f"{C.GREEN}valid (404 for nonexistent){C.RESET}" if self.valid_403s
                       else f"{C.YELLOW}suspicious (403 for nonexistent){C.RESET}")
         print(status_403)
+        print()
+
+        print(f"  Checking for prefix-match redirect routing...", end=' ', flush=True)
+        self.fuzzy_redirect_routing = self._detect_fuzzy_prefix_routing(base_url)
+        if self.fuzzy_redirect_routing:
+            print(f"{C.YELLOW}detected{C.RESET}")
+            print(f"  {C.YELLOW}⚠{C.RESET}  {C.DIM}Short strings redirect to real pages here (smart-404 / "
+                  f"redirect-manager) — short wordlist hits below may be routing noise, "
+                  f"not real hidden endpoints{C.RESET}")
+        else:
+            print(f"{C.GREEN}none detected{C.RESET}")
         print()
 
         all_interesting = []

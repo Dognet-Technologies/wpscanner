@@ -1,6 +1,6 @@
 # WENDY – WordPress ENDpoint discoverY
 
-**v0.4.0** | Dognet Technologies srl | `info@dognet.tech`
+**v0.5.0** | Dognet Technologies srl | `info@dognet.tech`
 
 WENDY è uno scanner di sicurezza per WordPress che automatizza endpoint
 discovery, CVE matching, analisi security headers, user enumeration e
@@ -137,6 +137,9 @@ Opzioni:
   -vv                   Molto verboso: include dettagli di ogni request
   --aggressive          Modalità estesa: più plugin/temi, user enum completa,
                         WPScan API enrichment (se WPSCAN_API_TOKEN impostato)
+  -w, --wordlist FILE   Path/filename extra da testare come categoria dedicata
+                        "Custom Wordlist" (vedi sezione sotto per il formato)
+  --version             Mostra la versione ed esce
 ```
 
 ### Esempi
@@ -157,7 +160,34 @@ python wendy/endpoint_discovery.py -u
 
 # Aggiorna DB e scansiona in un solo comando
 python wendy/endpoint_discovery.py https://example.com -u
+
+# Con wordlist personalizzata
+python wendy/endpoint_discovery.py https://example.com -w /path/to/wordpress.fuzz.txt
 ```
+
+### Wordlist personalizzata (`-w`/`--wordlist`)
+
+Il file deve contenere **path/nomi file completi, uno per riga** — non estensioni
+nude. Ogni riga viene appesa così com'è all'URL base (lo slash iniziale è
+opzionale, viene aggiunto automaticamente se manca); righe vuote o che iniziano
+con `#` sono ignorate.
+
+```
+# commento — ignorato
+wp-admin/admin-db.php
+/installer-backup.php
+license.txt
+```
+
+**Non** fa combinazione automatica nome+estensione (nessun equivalente di
+`ffuf -e .bak,.old`): una riga come `.bak` da sola produce solo `/.bak`, non è
+utile come suffisso da applicare ad altri nomi. Se serve quel tipo di fuzzing,
+va pre-generato nel file stesso prima di passarlo a `-w`.
+
+Pensata per liste generiche di discovery (es. `SecLists/Discovery/Web-Content/`,
+`fuzzdb/discovery/predictable-filepaths/`) — **non** per liste di slug
+plugin/tema: quelli sono già enumerati tramite CVE database (Wordfence) +
+installs index (WordPress.org), molto più mirati di una wordlist statica.
 
 ### Output tipico
 
@@ -305,6 +335,37 @@ Gli autori declinano ogni responsabilità per usi impropri.
 ---
 
 ## Changelog
+
+### v0.5.0
+- **Fix: report CVE (fase 9) mischiava confermate e speculative** — CVE con
+  versione plugin non leggibile (`certain=False`) finivano nel conteggio
+  CRITICAL/HIGH/MEDIUM finale anche quando la Fase 2 stessa le aveva escluse e
+  dichiarava "No confirmed CVEs". Ora la Fase 9 applica lo stesso filtro: in
+  modalità normale sono escluse, con `--aggressive` mostrate a parte e taggate
+  `[UNCONFIRMED]`, mai conteggiate nei totali di severità
+- **Fix: Ctrl+C poco reattivo su categorie grandi** (es. Plugin Specific) —
+  `ThreadPoolExecutor` ora usa `shutdown(wait=False, cancel_futures=True)`
+  invece del default `wait=True` che aspettava l'intera coda; inoltre la retry
+  strategy ignora `Retry-After` inviato dal target (`respect_retry_after_header
+  =False`) per evitare stalli di minuti quando il target sta rate-limitando
+- **Fix: `PROBE_THEME_LIMIT` non rispettato** — il limite si applicava solo
+  alla porzione "priority" (CVE + popolari) della lista temi in normal mode; i
+  ~65 temi baseline venivano sempre aggiunti sopra, non soggetti al tetto. Ora
+  il limite copre la lista totale
+- **Fix: `INSTALLS_INDEX_LIMIT` ignorato da `update_db.py`** — l'updater usava
+  una costante hardcoded (`10000`) invece di leggere il valore da `.keys`
+- **Fix: file plugin non sensibili sondati inutilmente** — `readme.txt`,
+  `changelog.txt`, `LICENSE`, `readme.md`/`README.md` rimossi dalla probe di
+  Plugin Specific: sono pubblici per design in ogni plugin WP, non contengono
+  nulla di sensibile, e un controllo per substring poco profondo ha alta
+  probabilità di non trovare nulla anche se ci fosse qualcosa. Restano
+  `config.php`, `settings.php`, `debug.log`, `error.log`
+- **Nuovo: `-w`/`--wordlist FILE`** — categoria dedicata "Custom Wordlist" per
+  path/filename extra da testare, opt-in, non collegata all'enumerazione
+  plugin/tema (vedi sezione dedicata sopra)
+- **Nuovo: `--version`** su `endpoint_discovery.py` e `update_db.py`
+- **Versione centralizzata** in `wendy/config.py` (`__version__`), importata
+  da entrambi gli entry point — prima erano disallineate (v0.4.0 vs v0.3.0)
 
 ### v0.4.0
 - **Fix: versioni temi sempre `None`** — estratta `Version:` dall'header CSS di

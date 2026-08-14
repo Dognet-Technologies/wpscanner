@@ -3259,11 +3259,15 @@ def main():
                              '(or continue scanning if URL is also given)')
     parser.add_argument('--version', action='version', version=f'WENDY {__version__}')
     parser.add_argument('-w', '--wordlist', default=None, metavar='FILE',
-                        help='Extra generic paths/filenames to probe (one per line, '
-                             '"#" comments allowed) as a dedicated Custom Wordlist '
-                             'category — e.g. a SecLists/fuzzdb discovery list. Not '
-                             'for plugin/theme slugs: those are already driven by the '
-                             'CVE database + installs index.')
+                        help='Extra endpoints to probe as a dedicated "Custom '
+                             'Wordlist" category. One full path/filename per '
+                             'line — e.g. wp-admin/admin-db.php, license.txt — '
+                             'NOT bare extensions like .bak (no name+extension '
+                             'combining is done). Leading "/" optional, "#" '
+                             'comments and blank lines ignored. Point it at a '
+                             'SecLists/fuzzdb-style discovery list. Not for '
+                             'plugin/theme slugs: those are already driven by '
+                             'the CVE database + installs index.')
     args = parser.parse_args()
 
     if args.wordlist and not os.path.isfile(args.wordlist):

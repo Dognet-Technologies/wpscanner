@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WENDY CVE Database Updater v0.3.0
+WENDY CVE Database Updater
 Dognet Technologies srl | info@dognet.tech
 
 Fetches WordPress plugin vulnerability data from Wordfence Intelligence v3
@@ -34,9 +34,9 @@ from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Load API keys from wendy/.keys before anything else reads os.environ
 try:
-    from wendy.config import load_keys, load_probe_config
+    from wendy.config import load_keys, load_probe_config, __version__
 except ImportError:
-    from config import load_keys, load_probe_config
+    from config import load_keys, load_probe_config, __version__
 load_keys()
 _PROBE_CFG = load_probe_config()
 
@@ -58,7 +58,7 @@ WP_ORG_THEME_API             = "https://api.wordpress.org/themes/info/1.2/"
 WP_ORG_POPULAR_PLUGINS_LIMIT = _PROBE_CFG['installs_index_limit']
 WP_ORG_POPULAR_THEMES_LIMIT  = 500     # themes cached for smart theme probing
 
-_USER_AGENT = 'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)'
+_USER_AGENT = f'WENDY-Updater/{__version__} (github.com/Dognet-Technologies/wpscanner)'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSION COMPARISON (mirrors EndpointDiscovery._parse_ver logic)
@@ -181,7 +181,7 @@ def fetch_feed(timeout=90):
         FEED_URL,
         timeout=timeout,
         headers={
-            'User-Agent':     'WENDY-Updater/0.3 (github.com/Dognet-Technologies/wpscanner)',
+            'User-Agent':     _USER_AGENT,
             'Accept':         'application/json',
             'Authorization':  f'Bearer {key}',
         }
@@ -497,11 +497,12 @@ def main():
                         help='Fetch and parse but do not write cve_db.json')
     parser.add_argument('--output', default=DB_PATH, metavar='PATH',
                         help=f'Output path (default: {DB_PATH})')
+    parser.add_argument('--version', action='version', version=f'WENDY {__version__}')
     args = parser.parse_args()
 
     key_present = bool(os.environ.get('WORDFENCE_API_KEY', '').strip())
 
-    print("WENDY CVE Database Updater")
+    print(f"WENDY CVE Database Updater v{__version__}")
     print(f"Source : {FEED_URL}")
     print(f"Output : {args.output}")
     print(f"Auth   : {'key loaded' if key_present else 'NO KEY — add WORDFENCE_API_KEY to wendy/.keys'}")

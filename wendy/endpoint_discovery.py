@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-WENDY - WordPress ENDpoint discoverY v0.4.0
+WENDY - WordPress ENDpoint discoverY
 Dognet Technologies srl | info@dognet.tech
 For authorized security testing only.
 
 Usage: python endpoint_discovery.py <URL> [-v|-vv] [--aggressive]
+
+Version lives in wendy/config.py (__version__) — the single source of truth,
+shared with update_db.py. Do not hardcode a version number here.
 """
 
 import json
@@ -25,9 +28,9 @@ warnings.filterwarnings('ignore')
 
 # Load API keys and probe config — must happen before module-level constants below
 try:
-    from wendy.config import load_keys, load_probe_config
+    from wendy.config import load_keys, load_probe_config, __version__
 except ImportError:
-    from config import load_keys, load_probe_config
+    from config import load_keys, load_probe_config, __version__
 
 load_keys()
 _PROBE_CFG = load_probe_config()
@@ -304,16 +307,41 @@ def _build_priority_probe_list(exclude_set, limit=None, min_installs=0):
     result = [slug for _, slug in scored]
     return result[:limit] if limit is not None else result
 
+
+def _load_wordlist_file(path):
+    """
+    Load a custom wordlist for the 'custom_wordlist' endpoint category —
+    one path/filename per line, e.g. a SecLists or fuzzdb discovery list.
+
+    '#' comments and blank lines are skipped. A leading '/' is added when
+    missing, so entries copy-pasted straight from those lists (which use
+    'wp-admin/admin-db.php' style, no leading slash) work unmodified.
+    Order is preserved; duplicates are dropped.
+    """
+    entries = []
+    with open(path, encoding='utf-8', errors='ignore') as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if not line.startswith('/'):
+                line = '/' + line
+            entries.append(line)
+    return list(dict.fromkeys(entries))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN CLASS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EndpointDiscovery:
 
-    def __init__(self, verbosity=0, aggressive=False):
+    def __init__(self, verbosity=0, aggressive=False, wordlist_path=None):
         self.verbosity  = verbosity   # 0=normal, 1=-v, 2=-vv
         self.aggressive = aggressive  # expanded coverage
         self.valid_403s = True
+        self.custom_wordlist_entries = (
+            _load_wordlist_file(wordlist_path) if wordlist_path else []
+        )
 
         self.session = requests.Session()
         retry_strategy = Retry(
@@ -385,6 +413,8 @@ class EndpointDiscovery:
             'plugin_specific':    self.get_plugin_specific_endpoints,
             'sensitive_files':    self.get_sensitive_files_endpoints,
         }
+        if self.custom_wordlist_entries:
+            self.endpoint_categories['custom_wordlist'] = self.get_custom_wordlist_endpoints
 
     # ── UTILITIES ─────────────────────────────────────────────────────────────
 
@@ -2546,16 +2576,17 @@ class EndpointDiscovery:
         endpoints = []
         for plugin in plugins:
             endpoints += [
+                # readme.txt/changelog.txt/LICENSE/*.md are intentionally public
+                # in every WP plugin — they never contain anything sensitive, and
+                # a shallow substring check has a high chance of missing it even
+                # if they did. Version fingerprinting already happens in PHASE 1
+                # (readme.txt read against the much larger CVE-DB-priority slug
+                # list). Only probe files that would be a real misconfiguration.
                 f'/wp-content/plugins/{plugin}/',
-                f'/wp-content/plugins/{plugin}/readme.txt',
-                f'/wp-content/plugins/{plugin}/changelog.txt',
-                f'/wp-content/plugins/{plugin}/LICENSE',
                 f'/wp-content/plugins/{plugin}/config.php',
                 f'/wp-content/plugins/{plugin}/settings.php',
                 f'/wp-content/plugins/{plugin}/debug.log',
                 f'/wp-content/plugins/{plugin}/error.log',
-                f'/wp-content/plugins/{plugin}/readme.md',
-                f'/wp-content/plugins/{plugin}/README.md',
             ]
         return endpoints
 
@@ -2593,6 +2624,10 @@ class EndpointDiscovery:
             '/wp-content/uploads/config.php',
             '/wp-content/uploads/wp-config.php',
         ]
+
+    def get_custom_wordlist_endpoints(self, base_url):
+        """User-supplied paths from --wordlist, loaded once in __init__."""
+        return self.custom_wordlist_entries
 
     # ── SINGLE ENDPOINT TEST ──────────────────────────────────────────────────
 
@@ -3199,7 +3234,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog='wendy',
-        description='WENDY - WordPress ENDpoint discoverY v0.4.0\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
+        description=f'WENDY - WordPress ENDpoint discoverY v{__version__}\nDognet Technologies srl | info@dognet.tech\nFor authorized security testing only.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             'Endpoint Discovery — result sigils:\n'
@@ -3222,7 +3257,18 @@ def main():
     parser.add_argument('-u', '--update', action='store_true',
                         help='Update WENDY (git pull) and the CVE database, then exit '
                              '(or continue scanning if URL is also given)')
+    parser.add_argument('--version', action='version', version=f'WENDY {__version__}')
+    parser.add_argument('-w', '--wordlist', default=None, metavar='FILE',
+                        help='Extra generic paths/filenames to probe (one per line, '
+                             '"#" comments allowed) as a dedicated Custom Wordlist '
+                             'category — e.g. a SecLists/fuzzdb discovery list. Not '
+                             'for plugin/theme slugs: those are already driven by the '
+                             'CVE database + installs index.')
     args = parser.parse_args()
+
+    if args.wordlist and not os.path.isfile(args.wordlist):
+        print(f"ERROR: wordlist file not found: {args.wordlist}", file=sys.stderr)
+        sys.exit(1)
 
     if not args.url and not args.update:
         parser.print_help()
@@ -3259,7 +3305,7 @@ def main():
     print("#+#+# #+#+#  #+#        #+#   #+#+# #+#    #+#    #+#")
     print("###   ###   ########## ###    #### #########     ###")
     print()
-    print("  WENDY - WordPress ENDpoint discoverY  v0.4.0")
+    print(f"  WENDY - WordPress ENDpoint discoverY  v{__version__}")
     print("  Dognet Technologies srl | info@dognet.tech")
     print("  For Authorized Security Testing Only")
     print()
@@ -3298,7 +3344,8 @@ def main():
     if not args.url:
         sys.exit(0)
 
-    scanner = EndpointDiscovery(verbosity=verbosity, aggressive=args.aggressive)
+    scanner = EndpointDiscovery(verbosity=verbosity, aggressive=args.aggressive,
+                                 wordlist_path=args.wordlist)
     scanner.run_full_scan(args.url)
 
 

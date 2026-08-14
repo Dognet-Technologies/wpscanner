@@ -18,6 +18,13 @@ Probe tuning (all optional, see .keys.example for defaults):
 
 import os
 
+# Single source of truth for the WENDY version — imported by endpoint_discovery.py
+# and update_db.py so it can never drift out of sync between the two entry points.
+# Bump per SemVer: PATCH for fixes only, MINOR for a backward-compatible feature
+# add/remove, MAJOR for a breaking change (core engine rewrite, dropped feature,
+# incompatible CLI/config format).
+__version__ = "0.5.0"
+
 _KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.keys')
 
 # Defaults for all probe tuning parameters
